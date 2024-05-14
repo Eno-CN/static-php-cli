@@ -76,7 +76,7 @@ jobs:
         run: CACHE_API_EXEC=yes ./bin/spc-alpine-docker download --with-php=${{ inputs.version }} --for-extensions=${{ inputs.extensions }} ${{ env.SPC_BUILD_DEBUG }}
 
       # Run build command
-      - run: ./bin/spc-alpine-docker build ${{ inputs.extensions }} --with-libs="freetype,libjpeg,libavif,libwebp" ${{ env.SPC_BUILD_DEBUG }} ${{ env.SPC_BUILD_CLI }} ${{ env.SPC_BUILD_MICRO }} ${{ env.SPC_BUILD_FPM }} --with-micro-fake-cli
+      - run: ./bin/spc-alpine-docker build ${{ inputs.extensions }} --with-libs="ncurses,freetype,libjpeg,libavif,libwebp" ${{ env.SPC_BUILD_DEBUG }} ${{ env.SPC_BUILD_CLI }} ${{ env.SPC_BUILD_MICRO }} ${{ env.SPC_BUILD_FPM }} --with-micro-fake-cli
 
       # Upload cli executable
       - if: ${{ inputs.build-cli == true }}
