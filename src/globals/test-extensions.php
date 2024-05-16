@@ -11,10 +11,12 @@ declare(strict_types=1);
 
 // --------------------------------- edit area ---------------------------------
 
+$zts = true;
+
 // If you want to test your added extensions and libs, add below (comma separated, example `bcmath,openssl`).
 $extensions = match (PHP_OS_FAMILY) {
-    'Linux', 'Darwin' => 'intl,posix',
-    'Windows' => 'mbstring,pdo_sqlite,mbregex',
+    'Linux', 'Darwin' => 'parallel',
+    'Windows' => 'mbstring,pdo_sqlite,mbregex,parallel',
 };
 
 // If you want to test lib-suggests feature with extension, add them below (comma separated, example `libwebp,libavif`).
@@ -71,5 +73,6 @@ echo match ($argv[1]) {
     'libs' => $final_libs,
     'libs_cmd' => ($final_libs === '' ? '' : (' --with-libs=' . $final_libs)),
     'cmd' => $final_extensions_cmd . ($final_libs === '' ? '' : (' --with-libs=' . $final_libs)),
+    'zts' => $zts ? '--enable-zts' : '',
     default => '',
 };

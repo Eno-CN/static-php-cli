@@ -51,7 +51,7 @@ class GlobalEnvManager
 
         // Init system-specific env
         match (PHP_OS_FAMILY) {
-            'Windows' => self::initWindowsEnv($builder),
+            'Windows' => self::initWindowsEnv(),
             'Darwin' => self::initDarwinEnv($builder),
             'Linux' => self::initLinuxEnv($builder),
             'BSD' => 'TODO',
@@ -59,16 +59,17 @@ class GlobalEnvManager
         };
     }
 
-    private static function initWindowsEnv(BuilderBase $builder): void
+    private static function initWindowsEnv(): void
     {
         // Windows need php-sdk binary tools
         self::initIfNotExists('PHP_SDK_PATH', WORKING_DIR . DIRECTORY_SEPARATOR . 'php-sdk-binary-tools');
+        self::initIfNotExists('UPX_EXEC', PKG_ROOT_PATH . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'upx.exe');
     }
 
     private static function initLinuxEnv(BuilderBase $builder): void
     {
         // Init C Compiler and C++ Compiler (alpine)
-        if (\SPC\builder\linux\SystemUtil::isMuslDist()) {
+        if (LinuxSystemUtil::isMuslDist()) {
             self::initIfNotExists('CC', 'gcc');
             self::initIfNotExists('CXX', 'g++');
             self::initIfNotExists('AR', 'ar');
@@ -79,7 +80,9 @@ class GlobalEnvManager
             self::initIfNotExists('CXX', "{$arch}-linux-musl-g++");
             self::initIfNotExists('AR', "{$arch}-linux-musl-ar");
             self::initIfNotExists('LD', 'ld.gold');
-            self::putenv("PATH=/usr/local/musl/bin:/usr/local/musl/{$arch}-linux-musl/bin:" . getenv('PATH'));
+            if (getenv('SPC_NO_MUSL_PATH') !== 'yes') {
+                self::putenv("PATH=/usr/local/musl/bin:/usr/local/musl/{$arch}-linux-musl/bin:" . getenv('PATH'));
+            }
         }
 
         // Init arch-specific cflags
@@ -105,12 +108,11 @@ class GlobalEnvManager
             'SPC_CMD_VAR_PHP_CONFIGURE_CFLAGS' => getenv('SPC_DEFAULT_C_FLAGS'),
             'SPC_CMD_VAR_PHP_CONFIGURE_CPPFLAGS' => '-I' . BUILD_INCLUDE_PATH,
             'SPC_CMD_VAR_PHP_CONFIGURE_LDFLAGS' => '-L' . BUILD_LIB_PATH,
-            'SPC_CMD_VAR_PHP_CONFIGURE_LIBS' => '-ldl -lpthread',
+            'SPC_CMD_VAR_PHP_CONFIGURE_LIBS' => '-ldl -lpthread -lm',
             'SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS' => $php_extra_cflags_optimize . ' -fno-ident -fPIE',
             'SPC_CMD_VAR_PHP_MAKE_EXTRA_LIBS' => '',
             'SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_PROGRAM' => $clang_use_lld . '-all-static',
         ];
-
         foreach ($init_spc_cmd_maps as $name => $value) {
             self::initIfNotExists($name, $value);
         }

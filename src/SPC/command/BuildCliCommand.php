@@ -17,7 +17,7 @@ use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputOption;
 use ZM\Logger\ConsoleColor;
 
-#[AsCommand('build', 'build PHP')]
+#[AsCommand('build', 'build PHP', ['build:php'])]
 class BuildCliCommand extends BuildCommand
 {
     public function configure(): void
@@ -93,6 +93,9 @@ class BuildCliCommand extends BuildCommand
             if ($this->getOption('no-strip')) {
                 logger()->warning('--with-upx-pack conflicts with --no-strip, --no-strip won\'t work!');
             }
+            if (($rule & BUILD_TARGET_MICRO) === BUILD_TARGET_MICRO) {
+                logger()->warning('Some cases micro.sfx cannot be packed via UPX due to dynamic size bug, be aware!');
+            }
         }
         try {
             // create builder
@@ -131,19 +134,25 @@ class BuildCliCommand extends BuildCommand
             if (!empty($not_included)) {
                 $indent_texts['Extra Exts (' . count($not_included) . ')'] = implode(', ', $not_included);
             }
-            $this->printFormatInfo($indent_texts);
             $this->printFormatInfo($this->getDefinedEnvs(), true);
+            $this->printFormatInfo($indent_texts);
+
             logger()->notice('Build will start after 2s ...');
             sleep(2);
+
+            // compile libraries
+            $builder->proveLibs($libraries);
+            // check extensions
+            $builder->proveExts($extensions);
+            // validate libs and exts
+            $builder->validateLibsAndExts();
+            // build libraries
+            $builder->buildLibs();
 
             if ($this->input->getOption('with-clean')) {
                 logger()->info('Cleaning source dir...');
                 FileSystem::removeDir(SOURCE_PATH);
             }
-            // compile libraries
-            $builder->buildLibs($libraries);
-            // check extensions
-            $builder->proveExts($extensions);
 
             // Process -I option
             $custom_ini = [];

@@ -61,7 +61,11 @@ class BuildLibsCommand extends BuildCommand
             $builder->setLibsOnly();
             // 编译和检查库完整
             $libraries = DependencyUtil::getLibs($libraries);
-            $builder->buildLibs($libraries);
+            logger()->info('Building libraries: ' . implode(',', $libraries));
+            sleep(2);
+            $builder->proveLibs($libraries);
+            $builder->validateLibsAndExts();
+            $builder->buildLibs();
 
             $time = round(microtime(true) - START_TIME, 3);
             logger()->info('Build libs complete, used ' . $time . ' s !');

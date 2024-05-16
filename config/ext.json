@@ -173,7 +173,7 @@
         "lib-depends": [
             "imap"
         ],
-        "lib-suggests": [
+        "ext-suggests": [
             "openssl"
         ]
     },
@@ -278,6 +278,14 @@
         ],
         "ext-depends": [
             "zlib"
+        ]
+    },
+    "parallel": {
+        "type": "external",
+        "source": "parallel",
+        "arg-type-windows": "with",
+        "lib-depends-windows": [
+            "pthreads4w"
         ]
     },
     "password-argon2": {
