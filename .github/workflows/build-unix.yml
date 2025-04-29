@@ -115,12 +115,12 @@ jobs:
           case "${{ inputs.os }}" in
             linux-x86_64)
               DOWN_CMD="./bin/spc-alpine-docker download"
-              BUILD_CMD="./bin/spc-alpine-docker build"
+              BUILD_CMD="./bin/spc-alpine-docker install-pkg upx && ./bin/spc-alpine-docker build"
               RUNS_ON="ubuntu-latest"
               ;;
             linux-aarch64)
               DOWN_CMD="./bin/spc-alpine-docker download"
-              BUILD_CMD="./bin/spc-alpine-docker install-pkg upx && ./bin/spc-alpine-docker build"
+              BUILD_CMD="./bin/spc-alpine-docker build"
               RUNS_ON="ubuntu-24.04-arm"
               ;;
             linux-x86_64-glibc)
