@@ -120,7 +120,7 @@ jobs:
               ;;
             linux-aarch64)
               DOWN_CMD="./bin/spc-alpine-docker download"
-              BUILD_CMD="./bin/spc-alpine-docker build"
+              BUILD_CMD="./bin/spc-alpine-docker install-pkg upx && ./bin/spc-alpine-docker build"
               RUNS_ON="ubuntu-24.04-arm"
               ;;
             linux-x86_64-glibc)
@@ -158,7 +158,7 @@ jobs:
               DOWN_CMD="$DOWN_CMD --prefer-pre-built"
           fi
           if [ ${{ inputs.build-cli }} == true ]; then
-              BUILD_CMD="$BUILD_CMD --build-cli"
+              BUILD_CMD="$BUILD_CMD --build-cli --with-upx-pack"
           fi
           if [ ${{ inputs.build-micro }} == true ]; then
               BUILD_CMD="$BUILD_CMD --build-micro"
