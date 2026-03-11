@@ -13,23 +13,25 @@ declare(strict_types=1);
 
 // test php version (8.1 ~ 8.4 available, multiple for matrix)
 $test_php_version = [
-    '8.1',
-    '8.2',
-    '8.3',
+    // '8.1',
+    // '8.2',
+    // '8.3',
     '8.4',
+    '8.5',
+    // 'git',
 ];
 
-// test os (macos-13, macos-14, macos-15, ubuntu-latest, windows-latest are available)
+// test os (macos-15-intel, macos-15, ubuntu-latest, windows-latest are available)
 $test_os = [
-    // 'macos-13',
-    // 'macos-14',
-    // 'macos-15',
-    // 'ubuntu-latest',
-    // 'ubuntu-22.04',
-    // 'ubuntu-24.04',
-    // 'ubuntu-22.04-arm',
-    // 'ubuntu-24.04-arm',
-    'windows-latest',
+    'macos-15-intel', // bin/spc for x86_64
+    'macos-15', // bin/spc for arm64
+    // 'ubuntu-latest', // bin/spc-alpine-docker for x86_64
+    'ubuntu-22.04', // bin/spc-gnu-docker for x86_64
+    'ubuntu-24.04', // bin/spc for x86_64
+    'ubuntu-22.04-arm', // bin/spc-gnu-docker for arm64
+    'ubuntu-24.04-arm', // bin/spc for arm64
+    // 'windows-2022', // .\bin\spc.ps1
+    // 'windows-2025',
 ];
 
 // whether enable thread safe
@@ -40,22 +42,29 @@ $no_strip = false;
 // compress with upx
 $upx = false;
 
+// whether to test frankenphp build, only available for macos and linux
+$frankenphp = false;
+
 // prefer downloading pre-built packages to speed up the build process
 $prefer_pre_built = false;
 
 // If you want to test your added extensions and libs, add below (comma separated, example `bcmath,openssl`).
 $extensions = match (PHP_OS_FAMILY) {
-    'Linux', 'Darwin' => 'pgsql',
-    'Windows' => 'xlswriter,openssl',
+    'Linux', 'Darwin' => 'grpc',
+    'Windows' => 'com_dotnet',
 };
 
 // If you want to test shared extensions, add them below (comma separated, example `bcmath,openssl`).
 $shared_extensions = match (PHP_OS_FAMILY) {
-    'Linux' => 'xdebug',
-    'Windows', 'Darwin' => '',
+    'Linux' => '',
+    'Darwin' => '',
+    'Windows' => '',
 };
 
-// If you want to test lib-suggests feature with extension, add them below (comma separated, example `libwebp,libavif`).
+// If you want to test lib-suggests for all extensions and libraries, set it to true.
+$with_suggested_libs = false;
+
+// If you want to test extra libs for extensions, add them below (comma separated, example `libwebp,libavif`). Unnecessary, when $with_suggested_libs is true.
 $with_libs = match (PHP_OS_FAMILY) {
     'Linux', 'Darwin' => '',
     'Windows' => '',
@@ -131,7 +140,7 @@ if ($argv[1] === 'doctor_cmd') {
     $doctor_cmd = 'doctor --auto-fix --debug';
 }
 if ($argv[1] === 'install_upx_cmd') {
-    $install_upx_cmd = 'install-pkg upx';
+    $install_upx_cmd = 'install-pkg upx --debug';
 }
 
 $prefix = match ($argv[2] ?? null) {
@@ -147,13 +156,12 @@ if ($shared_extensions) {
     switch ($argv[2] ?? null) {
         case 'ubuntu-22.04':
         case 'ubuntu-22.04-arm':
+        case 'macos-15':
+        case 'macos-15-intel':
             $shared_cmd = ' --build-shared=' . quote2($shared_extensions) . ' ';
             break;
-        case 'macos-13':
-        case 'macos-14':
-        case 'macos-15':
-            $shared_cmd = ' --build-shared=' . quote2($shared_extensions) . ' ';
-            $no_strip = true;
+        case 'ubuntu-24.04':
+        case 'ubuntu-24.04-arm':
             break;
         default:
             $shared_cmd = '';
@@ -168,6 +176,7 @@ if ($argv[1] === 'build_cmd' || $argv[1] === 'build_embed_cmd') {
     $build_cmd = 'build ';
     $build_cmd .= quote2($final_extensions) . ' ';
     $build_cmd .= $shared_cmd;
+    $build_cmd .= $with_suggested_libs ? '--with-suggested-libs ' : '';
     $build_cmd .= $zts ? '--enable-zts ' : '';
     $build_cmd .= $no_strip ? '--no-strip ' : '';
     $build_cmd .= $upx ? '--with-upx-pack ' : '';
@@ -200,10 +209,16 @@ switch ($argv[1] ?? null) {
         passthru($prefix . $down_cmd, $retcode);
         break;
     case 'build_cmd':
-        passthru($prefix . $build_cmd . ' --build-cli --build-micro', $retcode);
+        passthru($prefix . $build_cmd . ' --build-cli --build-micro --build-cgi', $retcode);
         break;
     case 'build_embed_cmd':
-        passthru($prefix . $build_cmd . (str_starts_with($argv[2], 'windows-') ? ' --build-cli' : ' --build-embed'), $retcode);
+        if ($frankenphp) {
+            passthru("{$prefix}install-pkg go-xcaddy --debug", $retcode);
+            if ($retcode !== 0) {
+                break;
+            }
+        }
+        passthru($prefix . $build_cmd . (str_starts_with($argv[2], 'windows-') ? ' --build-cli' : (' --build-embed' . ($frankenphp ? ' --build-frankenphp' : ''))), $retcode);
         break;
     case 'doctor_cmd':
         passthru($prefix . $doctor_cmd, $retcode);

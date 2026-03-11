@@ -4,16 +4,15 @@ declare(strict_types=1);
 
 namespace SPC\Tests\builder;
 
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use SPC\builder\BuilderBase;
 use SPC\builder\BuilderProvider;
 use SPC\builder\Extension;
 use SPC\builder\LibraryBase;
-use SPC\exception\RuntimeException;
 use SPC\exception\WrongUsageException;
 use SPC\store\FileSystem;
-use SPC\util\CustomExt;
+use SPC\store\LockFile;
+use SPC\util\AttributeMapper;
 use SPC\util\DependencyUtil;
 use Symfony\Component\Console\Input\ArgvInput;
 
@@ -35,9 +34,8 @@ class BuilderTest extends TestCase
         $this->builder = BuilderProvider::makeBuilderByInput(new ArgvInput());
         [$extensions, $libs] = DependencyUtil::getExtsAndLibs(['mbregex']);
         $this->builder->proveLibs($libs);
-        CustomExt::loadCustomExt();
         foreach ($extensions as $extension) {
-            $class = CustomExt::getExtClass($extension);
+            $class = AttributeMapper::getExtensionClassByName($extension) ?? Extension::class;
             $ext = new $class($extension, $this->builder);
             $this->builder->addExt($ext);
         }
@@ -64,12 +62,6 @@ class BuilderTest extends TestCase
         $this->assertInstanceOf(Extension::class, $this->builder->getExt('mbregex'));
     }
 
-    public function testHasCpp()
-    {
-        // mbregex doesn't have cpp
-        $this->assertFalse($this->builder->hasCpp());
-    }
-
     public function testMakeExtensionArgs()
     {
         $this->assertStringContainsString('--enable-mbstring', $this->builder->makeStaticExtensionArgs());
@@ -89,7 +81,7 @@ class BuilderTest extends TestCase
             if ($cnt !== 0) {
                 $this->assertEquals(intval($match[1]), $this->builder->getPHPVersionID());
             } else {
-                $this->expectException(RuntimeException::class);
+                $this->expectException(WrongUsageException::class);
                 $this->builder->getPHPVersionID();
             }
         } else {
@@ -102,11 +94,11 @@ class BuilderTest extends TestCase
     {
         if (file_exists(SOURCE_PATH . '/php-src/main/php_version.h')) {
             $file = SOURCE_PATH . '/php-src/main/php_version.h';
-            $cnt = preg_match('/PHP_VERSION "(\d+\.\d+\.\d+)"/', file_get_contents($file), $match);
+            $cnt = preg_match('/PHP_VERSION "(\d+\.\d+\.\d+(?:-[^"]+)?)/', file_get_contents($file), $match);
             if ($cnt !== 0) {
                 $this->assertEquals($match[1], $this->builder->getPHPVersion());
             } else {
-                $this->expectException(RuntimeException::class);
+                $this->expectException(WrongUsageException::class);
                 $this->builder->getPHPVersion();
             }
         } else {
@@ -117,7 +109,7 @@ class BuilderTest extends TestCase
 
     public function testGetPHPVersionFromArchive()
     {
-        $lock = file_exists(DOWNLOAD_PATH . '/.lock.json') ? file_get_contents(DOWNLOAD_PATH . '/.lock.json') : false;
+        $lock = file_exists(LockFile::LOCK_FILE) ? file_get_contents(LockFile::LOCK_FILE) : false;
         if ($lock === false) {
             $this->assertFalse($this->builder->getPHPVersionFromArchive());
         } else {
@@ -161,7 +153,8 @@ class BuilderTest extends TestCase
             [BUILD_TARGET_FPM, 'fpm'],
             [BUILD_TARGET_MICRO, 'micro'],
             [BUILD_TARGET_EMBED, 'embed'],
-            [BUILD_TARGET_ALL, 'cli, micro, fpm, embed'],
+            [BUILD_TARGET_FRANKENPHP, 'frankenphp'],
+            [BUILD_TARGET_ALL, 'cli, micro, fpm, embed, frankenphp, cgi'],
             [BUILD_TARGET_CLI | BUILD_TARGET_EMBED, 'cli, embed'],
         ];
     }
@@ -246,7 +239,7 @@ class BuilderTest extends TestCase
     public function testEmitPatchPointNotExists()
     {
         $this->expectOutputRegex('/failed to run/');
-        $this->expectException(RuntimeException::class);
+        $this->expectException(WrongUsageException::class);
         $this->builder->setOption('with-added-patch', ['/tmp/patch-point.not_exsssists.php']);
         $this->builder->emitPatchPoint('not-exists');
     }

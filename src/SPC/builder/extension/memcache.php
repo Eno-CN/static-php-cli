@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace SPC\builder\extension;
 
 use SPC\builder\Extension;
-use SPC\exception\FileSystemException;
 use SPC\store\FileSystem;
 use SPC\util\CustomExt;
 
@@ -14,14 +13,14 @@ class memcache extends Extension
 {
     public function getUnixConfigureArg(bool $shared = false): string
     {
-        return '--enable-memcache --with-zlib-dir=' . BUILD_ROOT_PATH;
+        return '--enable-memcache' . ($shared ? '=shared' : '') . ' --with-zlib-dir=' . BUILD_ROOT_PATH;
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public function patchBeforeBuildconf(): bool
     {
+        if (!$this->isBuildStatic()) {
+            return false;
+        }
         FileSystem::replaceFileStr(
             SOURCE_PATH . '/php-src/ext/memcache/config9.m4',
             'if test -d $abs_srcdir/src ; then',
@@ -46,5 +45,28 @@ extern zend_module_entry memcache_module_entry;
 EOF
         );
         return true;
+    }
+
+    public function patchBeforeSharedConfigure(): bool
+    {
+        if (!$this->isBuildShared()) {
+            return false;
+        }
+        FileSystem::replaceFileStr(
+            SOURCE_PATH . '/php-src/ext/memcache/config9.m4',
+            'if test -d $abs_srcdir/main ; then',
+            'if test -d $abs_srcdir/src ; then',
+        );
+        FileSystem::replaceFileStr(
+            SOURCE_PATH . '/php-src/ext/memcache/config9.m4',
+            'export CPPFLAGS="$CPPFLAGS $INCLUDES -I$abs_srcdir/main"',
+            'export CPPFLAGS="$CPPFLAGS $INCLUDES"',
+        );
+        return true;
+    }
+
+    protected function getExtraEnv(): array
+    {
+        return ['CFLAGS' => '-std=c17'];
     }
 }

@@ -4,38 +4,35 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
-use SPC\exception\WrongUsageException;
-use SPC\store\FileSystem;
+use SPC\util\executor\UnixCMakeExecutor;
 
 trait libwebp
 {
-    /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     */
     protected function build(): void
     {
-        // CMake needs a clean build directory
-        FileSystem::resetDir($this->source_dir . '/build');
-        // Start build
-        shell()->cd($this->source_dir . '/build')
-            ->exec(
-                'cmake ' .
-                $this->builder->makeCmakeArgs() . ' ' .
-                '-DBUILD_SHARED_LIBS=OFF ' .
-                '-DWEBP_BUILD_EXTRAS=ON ' .
-                '..'
+        $code = '#include <immintrin.h>
+int main() { return _mm256_cvtsi256_si32(_mm256_setzero_si256()); }';
+        $cc = getenv('CC') ?: 'gcc';
+        [$ret] = shell()->execWithResult("printf '%s' '{$code}' | {$cc} -x c -mavx2 -o /dev/null - 2>&1");
+        $disableAvx2 = $ret !== 0 && GNU_ARCH === 'x86_64' && PHP_OS_FAMILY === 'Linux';
+
+        UnixCMakeExecutor::create($this)
+            ->addConfigureArgs(
+                '-DWEBP_BUILD_EXTRAS=OFF',
+                '-DWEBP_BUILD_ANIM_UTILS=OFF',
+                '-DWEBP_BUILD_CWEBP=OFF',
+                '-DWEBP_BUILD_DWEBP=OFF',
+                '-DWEBP_BUILD_GIF2WEBP=OFF',
+                '-DWEBP_BUILD_IMG2WEBP=OFF',
+                '-DWEBP_BUILD_VWEBP=OFF',
+                '-DWEBP_BUILD_WEBPINFO=OFF',
+                '-DWEBP_BUILD_WEBPMUX=OFF',
+                '-DWEBP_BUILD_FUZZTEST=OFF',
+                $disableAvx2 ? '-DWEBP_ENABLE_SIMD=OFF' : ''
             )
-            ->exec("cmake --build . -j {$this->builder->concurrency}")
-            ->exec('make install');
+            ->build();
         // patch pkgconfig
-        $this->patchPkgconfPrefix(['libsharpyuv.pc', 'libwebp.pc', 'libwebpdecoder.pc', 'libwebpdemux.pc', 'libwebpmux.pc'], PKGCONF_PATCH_PREFIX | PKGCONF_PATCH_LIBDIR);
+        $this->patchPkgconfPrefix(patch_option: PKGCONF_PATCH_PREFIX | PKGCONF_PATCH_LIBDIR);
         $this->patchPkgconfPrefix(['libsharpyuv.pc'], PKGCONF_PATCH_CUSTOM, ['/^includedir=.*$/m', 'includedir=${prefix}/include/webp']);
-        $this->cleanLaFiles();
-        // fix imagemagick binary linking issue
-        $this->patchPkgconfPrefix(['libwebp.pc'], PKGCONF_PATCH_CUSTOM, ['/-lwebp$/m', '-lwebp -lsharpyuv']);
     }
 }

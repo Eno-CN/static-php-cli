@@ -4,7 +4,7 @@ import sidebarZh from "./sidebar.zh";
 
 // https://vitepress.dev/reference/site-config
 export default {
-  title: "static-php-cli",
+  title: "Static PHP",
   description: "Build single static PHP binary, with PHP project together, with popular extensions included.",
   locales: {
     en: {
@@ -44,9 +44,22 @@ export default {
   },
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
+    logo: '/images/static-php_nobg.png',
     nav: [],
     socialLinks: [
       {icon: 'github', link: 'https://github.com/crazywhalecc/static-php-cli'}
-    ]
+    ],
+    footer: {
+      message: 'Released under the MIT License.',
+      copyright: 'Copyright © 2023-present crazywhalecc'
+    },
+    search: {
+      provider: 'algolia',
+      options: {
+        appId: 'IHJHUB1SF1',
+        apiKey: '8266d31cc2ffbd0e059f1c6e5bdaf8fc',
+        indexName: 'static-php docs',
+      },
+    },
   }
 }

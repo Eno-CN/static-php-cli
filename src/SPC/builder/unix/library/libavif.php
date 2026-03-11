@@ -4,30 +4,21 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
-use SPC\exception\WrongUsageException;
-use SPC\store\FileSystem;
+use SPC\util\executor\UnixCMakeExecutor;
 
 trait libavif
 {
-    /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     */
     protected function build(): void
     {
-        // CMake needs a clean build directory
-        FileSystem::resetDir($this->source_dir . '/build');
-        // Start build
-        shell()->cd($this->source_dir . '/build')
-            ->setEnv(['CFLAGS' => $this->getLibExtraCFlags(), 'LDFLAGS' => $this->getLibExtraLdFlags(), 'LIBS' => $this->getLibExtraLibs()])
-            ->execWithEnv("cmake {$this->builder->makeCmakeArgs()} -DBUILD_SHARED_LIBS=OFF -DAVIF_LIBYUV=OFF ..")
-            ->execWithEnv("cmake --build . -j {$this->builder->concurrency}")
-            ->execWithEnv('make install');
+        UnixCMakeExecutor::create($this)
+            ->optionalLib('libaom', '-DAVIF_CODEC_AOM=SYSTEM', '-DAVIF_CODEC_AOM=OFF')
+            ->optionalLib('libsharpyuv', '-DAVIF_LIBSHARPYUV=SYSTEM', '-DAVIF_LIBSHARPYUV=OFF')
+            ->optionalLib('libjpeg', '-DAVIF_JPEG=SYSTEM', '-DAVIF_JPEG=OFF')
+            ->optionalLib('libxml2', '-DAVIF_LIBXML2=SYSTEM', '-DAVIF_LIBXML2=OFF')
+            ->optionalLib('libpng', '-DAVIF_LIBPNG=SYSTEM', '-DAVIF_LIBPNG=OFF')
+            ->addConfigureArgs('-DAVIF_LIBYUV=OFF')
+            ->build();
         // patch pkgconfig
         $this->patchPkgconfPrefix(['libavif.pc']);
-        $this->cleanLaFiles();
     }
 }

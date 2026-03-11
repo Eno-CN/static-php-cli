@@ -4,6 +4,8 @@
 
 ## curl
 
+HTTP3 支持默认未启用，需在编译时添加 `--with-libs="nghttp2,nghttp3,ngtcp2"` 以启用 PHP 8.4 及以上版本的 HTTP3 支持。
+
 使用 curl 请求 HTTPS 时，可能存在 `error:80000002:system library::No such file or directory` 错误，
 解决办法详见 [FAQ - 无法使用 ssl](../faq/#无法使用-ssl)。
 
@@ -41,19 +43,27 @@ swoole-hook-sqlite 不是一个扩展，而是 Swoole 的 Hook 特性。
 swoole-hook-sqlite 与 `pdo_sqlite` 扩展冲突。如需使用 Swoole 和 `pdo_sqlite`，请删除 pdo_sqlite 扩展，启用 `swoole` 和 `swoole-hook-sqlite` 即可。
 该扩展包含了 `pdo_sqlite` 的协程环境的实现。
 
+## swoole-hook-odbc
+
+swoole-hook-odbc 不是一个扩展，而是 Swoole 的 Hook 特性。
+如果你在编译时添加了 `swoole,swoole-hook-odbc`，你将启用 Swoole 的 `odbc` 扩展的协程模式。
+
+swoole-hook-odbc 与 `pdo_odbc` 扩展冲突。如需使用 Swoole 和 `pdo_odbc`，请删除 `pdo_odbc` 扩展，启用 `swoole` 和 `swoole-hook-odbc` 即可。
+该扩展包含了 `pdo_odbc` 的协程环境的实现。
+
 ## swow
 
-1. swow 仅支持 PHP 8.0 ~ 8.4 版本。
+1. swow 仅支持 PHP 8.0+ 版本。
 
 ## imagick
 
-imagick 扩展目前仅在 musl libc 上支持 OpenMP（libgomp）。使用 glibc 方式构建的 imagick 扩展无法支持多线程特性。
+1. OpenMP 支持已被禁用，这是维护者推荐的做法，系统软件包也是如此配置。
 
 ## imap
 
 1. 该扩展目前不支持 Kerberos。
 2. 由于底层的 c-client、ext-imap 不是线程安全的。 无法在 `--enable-zts` 构建中使用它。
-3. 由于该扩展可能会从未来的 PHP 中删除，因此我们建议您寻找替代实现，例如 [Webklex/php-imap](https://github.com/Webklex/php-imap)。
+3. 该扩展已在 PHP 8.4 中被移除，因此我们建议您寻找替代实现，例如 [Webklex/php-imap](https://github.com/Webklex/php-imap)。
 
 ## gd
 
@@ -74,7 +84,7 @@ bin/spc build gd --with-libs=freetype,libjpeg,libavif,libwebp --build-cli
 
 ## xdebug
 
-1. Xdebug 只能作为共享扩展进行构建。在 Linux 上，您需要使用 static-php-cli 并设置 SPC_LIBC=glibc。
+1. Xdebug 只能作为共享扩展进行构建。您需要使用除了 `musl-static` 外的其他 `SPC_TARGET` 构建目标。
 2. 使用 Linux/glibc 或 macOS 时，您可以使用 `--build-shared=xdebug` 将 Xdebug 编译为共享扩展。
    编译后的 `./php` 二进制文件可以通过指定 INI 文件进行配置和运行，例如 `./php -d 'zend_extension=/path/to/xdebug.so' your-code.php`。
 
@@ -112,8 +122,8 @@ pgsql 16.2 修复了这个 Bug，现在正常工作了。
 
 ## password-argon2
 
-1. password-argon2不是一个标准的扩展，它是 `password_hash` 函数的额外算法。
-2. 在Linux系统，password-argon2 的依赖库 `libargon2` 与 `libsodium` 库冲突。
+1. password-argon2不是一个标准的扩展。`password_hash` 函数的 `PASSWORD_ARGON2ID` 算法需要 libsodium 或 libargon2 才能工作。
+2. 使用 password-argon2 可以为此启用多线程支持。
 
 ## ffi
 
@@ -139,8 +149,7 @@ parallel 扩展只支持 PHP 8.0 及以上版本，并只支持 ZTS 构建（`--
 
 ## spx
 
-1. [SPX 扩展](https://github.com/NoiseByNorthwest/php-spx) 只支持非线程模式。
-2. SPX 目前不支持 Windows，且官方仓库也不支持静态编译，static-php-cli 使用了 [修改版本](https://github.com/static-php/php-spx)。
+1. SPX 目前不支持 Windows，且官方仓库也不支持静态编译，static-php-cli 使用了 [修改版本](https://github.com/static-php/php-spx)。
 
 ## mimalloc
 

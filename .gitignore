@@ -5,22 +5,28 @@ docker/extensions/
 docker/source/
 
 # Vendor files
-/vendor/
+/vendor/**
 
 # default source extract directory
-/source/
+/source/**
+
+# built by shared embed tests
+/locale/
 
 # default source download directory
-/downloads/
+/downloads/**
 
 # default source build root directory
-/buildroot/
+/buildroot/**
 
 # default package root directory
-/pkgroot/
+/pkgroot/**
+
+# Windows PHP SDK binary tools
+/php-sdk-binary-tools/**
 
 # default pack:lib and release directory
-/dist/
+/dist/**
 packlib_files.txt
 
 # tools cache files
@@ -31,9 +37,7 @@ packlib_files.txt
 /bin/*
 !/bin/spc*
 !/bin/setup-runtime*
-!/bin/spc-alpine-docker
-!/bin/php-cs-fixer-wrapper
-!/bin/build-static-frankenphp
+!/bin/docker-entrypoint.sh
 
 # exclude windows build tools
 /php-sdk-binary-tools/
@@ -47,3 +51,13 @@ packlib_files.txt
 /docs/.vitepress/cache/
 package-lock.json
 pnpm-lock.yaml
+
+# craft
+craft.yml
+
+# SPC logs
+log/
+
+# spc.phar
+spc.phar
+spc.exe

@@ -6,8 +6,10 @@ namespace SPC;
 
 use SPC\command\BuildLibsCommand;
 use SPC\command\BuildPHPCommand;
+use SPC\command\CraftCommand;
 use SPC\command\DeleteDownloadCommand;
 use SPC\command\dev\AllExtCommand;
+use SPC\command\dev\EnvCommand;
 use SPC\command\dev\ExtVerCommand;
 use SPC\command\dev\GenerateExtDepDocsCommand;
 use SPC\command\dev\GenerateExtDocCommand;
@@ -32,7 +34,7 @@ use Symfony\Component\Console\Application;
  */
 final class ConsoleApplication extends Application
 {
-    public const VERSION = '2.5.2';
+    public const string VERSION = '2.8.3';
 
     public function __construct()
     {
@@ -43,6 +45,8 @@ final class ConsoleApplication extends Application
 
         $this->addCommands(
             [
+                // Craft command
+                new CraftCommand(),
                 // Common commands
                 new BuildPHPCommand(),
                 new BuildLibsCommand(),
@@ -67,6 +71,7 @@ final class ConsoleApplication extends Application
                 new GenerateExtDepDocsCommand(),
                 new GenerateLibDepDocsCommand(),
                 new PackLibCommand(),
+                new EnvCommand(),
             ]
         );
     }

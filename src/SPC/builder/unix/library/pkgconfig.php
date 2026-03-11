@@ -4,33 +4,28 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\builder\linux\library\LinuxLibraryBase;
+use SPC\util\executor\UnixAutoconfExecutor;
+use SPC\util\SPCTarget;
 
 trait pkgconfig
 {
     protected function build(): void
     {
-        $cflags = PHP_OS_FAMILY !== 'Linux' ? "{$this->builder->arch_c_flags} -Wimplicit-function-declaration -Wno-int-conversion" : '';
-        $ldflags = !($this instanceof LinuxLibraryBase) || getenv('SPC_LIBC') === 'glibc' ? '' : '--static';
-
-        shell()->cd($this->source_dir)
-            ->setEnv(['CFLAGS' => "{$this->getLibExtraCFlags()} {$cflags}", 'LDFLAGS' => "{$this->getLibExtraLdFlags()} {$ldflags}", 'LIBS' => $this->getLibExtraLibs()])
-            ->execWithEnv(
-                './configure ' .
-                '--disable-shared ' .
-                '--enable-static ' .
-                '--with-internal-glib ' .
-                '--disable-host-tool ' .
-                '--with-pic ' .
-                '--prefix=' . BUILD_ROOT_PATH . ' ' .
-                '--without-sysroot ' .
-                '--without-system-include-path ' .
-                '--without-system-library-path ' .
-                '--without-pc-path'
+        UnixAutoconfExecutor::create($this)
+            ->appendEnv([
+                'CFLAGS' => '-Wimplicit-function-declaration -Wno-int-conversion',
+                'LDFLAGS' => SPCTarget::isStatic() ? '--static' : '',
+            ])
+            ->configure(
+                '--with-internal-glib',
+                '--disable-host-tool',
+                '--without-sysroot',
+                '--without-system-include-path',
+                '--without-system-library-path',
+                '--without-pc-path',
             )
-            ->exec('make clean')
-            ->execWithEnv("make -j{$this->builder->concurrency}")
-            ->execWithEnv('make install-exec');
+            ->make(with_install: 'install-exec');
+
         shell()->exec('strip ' . BUILD_ROOT_PATH . '/bin/pkg-config');
     }
 }

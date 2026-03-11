@@ -1,13 +1,9 @@
 name: Tests
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'src/globals/test-extensions.php'
   pull_request:
     branches: [ "main" ]
+    types: [ opened, synchronize, reopened ]
     paths:
       - 'src/**'
       - 'config/**'
@@ -17,8 +13,7 @@ on:
       - 'box.json'
       - '.php-cs-fixer.php'
 
-permissions:
-  contents: read
+permissions: read-all
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,7 +35,7 @@ jobs:
           tools: pecl, composer, php-cs-fixer
 
       - name: Run PHP-CS-Fixer fix
-        run: PHP_CS_FIXER_IGNORE_ENV=1 php-cs-fixer fix --dry-run --diff --ansi
+        run: php-cs-fixer fix --dry-run --diff --ansi
 
   phpstan:
     runs-on: ubuntu-latest
@@ -56,6 +51,8 @@ jobs:
           extensions: curl, openssl, mbstring
           ini-values: memory_limit=-1
           tools: composer
+        env:
+          phpts: zts
 
       - name: "Cache Composer packages"
         id: composer-cache
@@ -122,6 +119,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: 8.4
+          extensions: curl, openssl, mbstring
 
       - name: Define
         id: gendef
@@ -135,7 +133,7 @@ jobs:
   build:
     name: "Build PHP Test (PHP ${{ matrix.php }} ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
-    needs: define-matrix
+    needs: [define-matrix, php-cs-fixer, phpstan, phpunit]
     timeout-minutes: 120
     strategy:
       matrix:
@@ -143,6 +141,10 @@ jobs:
         os: ${{ fromJSON(needs.define-matrix.outputs.os) }}
       fail-fast: false
     steps:
+      - name: "Update runner packages"
+        if: ${{ startsWith(matrix.os, 'ubuntu-') }}
+        run: sudo apt-get update && sudo apt-get install -y ca-certificates
+
       - name: "Checkout"
         uses: actions/checkout@v4
 
@@ -173,7 +175,7 @@ jobs:
           key: php-dependencies-${{ matrix.os }}
 
       - name: "Install Dependencies"
-        run: composer update -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
+        run: composer update -vvv --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist --no-plugins
 
       - name: "Run Build Tests (doctor)"
         run: php src/globals/test-extensions.php doctor_cmd ${{ matrix.os }} ${{ matrix.php }}
@@ -199,3 +201,14 @@ jobs:
       - name: "Run Build Tests (build - embed for non-windows)"
         if: ${{ !startsWith(matrix.os, 'windows-') }}
         run: php src/globals/test-extensions.php build_embed_cmd ${{ matrix.os }} ${{ matrix.php }}
+
+      - name: "Upload logs"
+        if: ${{ always() && hashFiles('log/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.os }}-${{ matrix.php }}
+          path: log
+
+#      - name: Setup tmate session
+#        if: ${{ failure() }}
+#        uses: mxschmitt/action-tmate@v3

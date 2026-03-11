@@ -6,7 +6,6 @@ namespace SPC\Tests\util;
 
 use PHPUnit\Framework\TestCase;
 use SPC\builder\BuilderProvider;
-use SPC\exception\FileSystemException;
 use SPC\store\FileSystem;
 use SPC\util\SPCConfigUtil;
 use Symfony\Component\Console\Input\ArgvInput;
@@ -16,11 +15,12 @@ use Symfony\Component\Console\Input\ArgvInput;
  */
 class SPCConfigUtilTest extends TestCase
 {
-    /**
-     * @throws FileSystemException
-     */
     public static function setUpBeforeClass(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            // Skip tests on Windows as SPCConfigUtil is not applicable
+            self::markTestSkipped('SPCConfigUtil tests are not applicable on Windows.');
+        }
         $testdir = WORKING_DIR . '/.configtest';
         FileSystem::createDir($testdir);
         FileSystem::writeFile($testdir . '/lib.json', file_get_contents(ROOT_DIR . '/config/lib.json'));
@@ -31,9 +31,6 @@ class SPCConfigUtilTest extends TestCase
         FileSystem::loadConfigArray('source', $testdir);
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function tearDownAfterClass(): void
     {
         FileSystem::removeDir(WORKING_DIR . '/.configtest');
@@ -47,6 +44,9 @@ class SPCConfigUtilTest extends TestCase
 
     public function testConfig(): void
     {
+        if (PHP_OS_FAMILY !== 'Linux') {
+            $this->markTestSkipped('SPCConfigUtil tests are only applicable on Linux.');
+        }
         // normal
         $result = (new SPCConfigUtil())->config(['bcmath']);
         $this->assertStringContainsString(BUILD_ROOT_PATH . '/include', $result['cflags']);
@@ -54,21 +54,21 @@ class SPCConfigUtilTest extends TestCase
         $this->assertStringContainsString('-lphp', $result['libs']);
 
         // has cpp
-        $result = (new SPCConfigUtil())->config(['swoole']);
+        $result = (new SPCConfigUtil())->config(['rar']);
         $this->assertStringContainsString(PHP_OS_FAMILY === 'Darwin' ? '-lc++' : '-lstdc++', $result['libs']);
 
-        // has mimalloc.o in lib dir
+        // has libmimalloc.a in lib dir
         // backup first
-        if (file_exists(BUILD_LIB_PATH . '/mimalloc.o')) {
-            $bak = file_get_contents(BUILD_LIB_PATH . '/mimalloc.o');
-            @unlink(BUILD_LIB_PATH . '/mimalloc.o');
+        if (file_exists(BUILD_LIB_PATH . '/libmimalloc.a')) {
+            $bak = file_get_contents(BUILD_LIB_PATH . '/libmimalloc.a');
+            @unlink(BUILD_LIB_PATH . '/libmimalloc.a');
         }
-        file_put_contents(BUILD_LIB_PATH . '/mimalloc.o', '');
+        file_put_contents(BUILD_LIB_PATH . '/libmimalloc.a', '');
         $result = (new SPCConfigUtil())->config(['bcmath'], ['mimalloc']);
-        $this->assertStringStartsWith(BUILD_LIB_PATH . '/mimalloc.o', $result['libs']);
-        @unlink(BUILD_LIB_PATH . '/mimalloc.o');
+        $this->assertStringStartsWith(BUILD_LIB_PATH . '/libmimalloc.a', $result['libs']);
+        @unlink(BUILD_LIB_PATH . '/libmimalloc.a');
         if (isset($bak)) {
-            file_put_contents(BUILD_LIB_PATH . '/mimalloc.o', $bak);
+            file_put_contents(BUILD_LIB_PATH . '/libmimalloc.a', $bak);
         }
     }
 }

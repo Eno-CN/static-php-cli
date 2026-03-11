@@ -4,35 +4,22 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
-use SPC\store\FileSystem;
+use SPC\util\executor\UnixCMakeExecutor;
+use SPC\util\SPCTarget;
 
 trait mimalloc
 {
-    /**
-     * @throws RuntimeException
-     * @throws FileSystemException
-     */
     protected function build(): void
     {
-        $args = '';
-        if (getenv('SPC_LIBC') === 'musl') {
-            $args .= '-DMI_LIBC_MUSL=ON ';
+        $cmake = UnixCMakeExecutor::create($this)
+            ->addConfigureArgs(
+                '-DMI_BUILD_SHARED=OFF',
+                '-DMI_BUILD_OBJECT=OFF',
+                '-DMI_INSTALL_TOPLEVEL=ON',
+            );
+        if (SPCTarget::getLibc() === 'musl') {
+            $cmake->addConfigureArgs('-DMI_LIBC_MUSL=ON');
         }
-        $args .= '-DMI_BUILD_SHARED=OFF ';
-        $args .= '-DMI_INSTALL_TOPLEVEL=ON ';
-        FileSystem::resetDir($this->source_dir . '/build');
-        shell()->cd($this->source_dir . '/build')
-            ->execWithEnv(
-                'cmake ' .
-                '-DCMAKE_INSTALL_PREFIX=' . BUILD_ROOT_PATH . ' ' .
-                "-DCMAKE_TOOLCHAIN_FILE={$this->builder->cmake_toolchain_file} " .
-                '-DCMAKE_BUILD_TYPE=Release ' .
-                $args .
-                '..'
-            )
-            ->execWithEnv("make -j{$this->builder->concurrency}")
-            ->execWithEnv('make install');
+        $cmake->build();
     }
 }

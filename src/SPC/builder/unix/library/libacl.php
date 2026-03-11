@@ -4,15 +4,11 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
 use SPC\store\FileSystem;
+use SPC\util\executor\UnixAutoconfExecutor;
 
 trait libacl
 {
-    /**
-     * @throws FileSystemException
-     */
     public function patchBeforeMake(): bool
     {
         $file_path = SOURCE_PATH . '/php-src/Makefile';
@@ -24,23 +20,13 @@ trait libacl
         return true;
     }
 
-    /**
-     * @throws RuntimeException
-     */
     protected function build(): void
     {
-        shell()->cd($this->source_dir)
-            ->setEnv([
-                'CFLAGS' => trim('-I' . BUILD_INCLUDE_PATH . ' ' . $this->getLibExtraCFlags()),
-                'LDFLAGS' => trim('-L' . BUILD_LIB_PATH . ' ' . $this->getLibExtraLdFlags()),
-                'LIBS' => $this->getLibExtraLibs(),
-            ])
-            ->execWithEnv('libtoolize --force --copy')
-            ->execWithEnv('./autogen.sh || autoreconf -if')
-            ->execWithEnv('./configure --prefix= --enable-static --disable-shared --disable-tests --disable-nls')
-            ->execWithEnv("make -j {$this->builder->concurrency}")
-            ->exec('make install DESTDIR=' . BUILD_ROOT_PATH);
-
+        UnixAutoconfExecutor::create($this)
+            ->exec('libtoolize --force --copy')
+            ->exec('./autogen.sh || autoreconf -if')
+            ->configure('--disable-nls', '--disable-tests')
+            ->make('install-acl_h install-libacl_h install-data install-libLTLIBRARIES install-pkgincludeHEADERS install-sysincludeHEADERS install-pkgconfDATA', with_install: false);
         $this->patchPkgconfPrefix(['libacl.pc'], PKGCONF_PATCH_PREFIX);
     }
 }

@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace SPC\builder;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
+use SPC\builder\unix\UnixBuilderBase;
+use SPC\exception\EnvironmentException;
+use SPC\exception\SPCException;
+use SPC\exception\ValidationException;
 use SPC\exception\WrongUsageException;
 use SPC\store\Config;
 use SPC\store\FileSystem;
 use SPC\util\SPCConfigUtil;
+use SPC\util\SPCTarget;
 
 class Extension
 {
@@ -21,21 +24,16 @@ class Extension
 
     protected string $source_dir;
 
-    /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     */
     public function __construct(protected string $name, protected BuilderBase $builder)
     {
         $ext_type = Config::getExt($this->name, 'type');
         $unix_only = Config::getExt($this->name, 'unix-only', false);
         $windows_only = Config::getExt($this->name, 'windows-only', false);
         if (PHP_OS_FAMILY !== 'Windows' && $windows_only) {
-            throw new RuntimeException("{$ext_type} extension {$name} is not supported on Linux and macOS platform");
+            throw new EnvironmentException("{$ext_type} extension {$name} is not supported on Linux and macOS platform");
         }
         if (PHP_OS_FAMILY === 'Windows' && $unix_only) {
-            throw new RuntimeException("{$ext_type} extension {$name} is not supported on Windows platform");
+            throw new EnvironmentException("{$ext_type} extension {$name} is not supported on Windows platform");
         }
         // set source_dir for builtin
         if ($ext_type === 'builtin') {
@@ -43,7 +41,7 @@ class Extension
         } elseif ($ext_type === 'external') {
             $source = Config::getExt($this->name, 'source');
             if ($source === null) {
-                throw new RuntimeException("{$ext_type} extension {$name} source not found");
+                throw new ValidationException("{$ext_type} extension {$name} source not found", validation_module: "Extension [{$name}] loader");
             }
             $source_path = Config::getSource($source)['path'] ?? null;
             $source_path = $source_path === null ? SOURCE_PATH . '/' . $source : SOURCE_PATH . '/' . $source_path;
@@ -53,43 +51,39 @@ class Extension
         }
     }
 
+    public function getFrameworks(): array
+    {
+        return Config::getExt($this->getName(), 'frameworks', []);
+    }
+
     /**
      * 获取开启该扩展的 PHP 编译添加的参数
-     *
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
-    public function getConfigureArg(): string
+    public function getConfigureArg(bool $shared = false): string
     {
-        $arg = $this->getEnableArg();
-        switch (PHP_OS_FAMILY) {
-            case 'Windows':
-                $arg .= $this->getWindowsConfigureArg();
-                break;
-            case 'Darwin':
-            case 'Linux':
-            case 'BSD':
-                $arg .= $this->getUnixConfigureArg();
-                break;
-        }
-        return $arg;
+        return match (PHP_OS_FAMILY) {
+            'Windows' => $this->getWindowsConfigureArg($shared),
+            'Darwin',
+            'Linux',
+            'BSD' => $this->getUnixConfigureArg($shared),
+            default => throw new WrongUsageException(PHP_OS_FAMILY . ' build is not supported yet'),
+        };
     }
 
     /**
      * 根据 ext 的 arg-type 获取对应开启的参数，一般都是 --enable-xxx 和 --with-xxx
-     *
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
-    public function getEnableArg(): string
+    public function getEnableArg(bool $shared = false): string
     {
+        $escapedPath = str_replace("'", '', escapeshellarg(BUILD_ROOT_PATH)) !== BUILD_ROOT_PATH || str_contains(BUILD_ROOT_PATH, ' ') ? escapeshellarg(BUILD_ROOT_PATH) : BUILD_ROOT_PATH;
         $_name = str_replace('_', '-', $this->name);
         return match ($arg_type = Config::getExt($this->name, 'arg-type', 'enable')) {
-            'enable' => '--enable-' . $_name . ' ',
-            'with' => '--with-' . $_name . ' ',
-            'with-prefix' => '--with-' . $_name . '="' . BUILD_ROOT_PATH . '" ',
+            'enable' => '--enable-' . $_name . ($shared ? '=shared' : '') . ' ',
+            'enable-path' => '--enable-' . $_name . '=' . ($shared ? 'shared,' : '') . $escapedPath . ' ',
+            'with' => '--with-' . $_name . ($shared ? '=shared' : '') . ' ',
+            'with-path' => '--with-' . $_name . '=' . ($shared ? 'shared,' : '') . $escapedPath . ' ',
             'none', 'custom' => '',
-            default => throw new WrongUsageException("argType does not accept {$arg_type}, use [enable/with/with-prefix] ."),
+            default => throw new WrongUsageException("argType does not accept {$arg_type}, use [enable/with/with-path] ."),
         };
     }
 
@@ -102,15 +96,12 @@ class Extension
             fn ($x) => $x->getStaticLibFiles(),
             $this->getLibraryDependencies(recursive: true)
         );
-        return implode(' ', $ret);
+        $libs = implode(' ', $ret);
+        return deduplicate_flags($libs);
     }
 
     /**
      * 检查下依赖就行了，作用是导入依赖给 Extension 对象，今后可以对库依赖进行选择性处理
-     *
-     * @throws RuntimeException
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
     public function checkDependency(): static
     {
@@ -147,15 +138,15 @@ class Extension
         return $this->name;
     }
 
-    public function getWindowsConfigureArg(): string
+    public function getWindowsConfigureArg(bool $shared = false): string
     {
-        return '';
+        return $this->getEnableArg();
         // Windows is not supported yet
     }
 
     public function getUnixConfigureArg(bool $shared = false): string
     {
-        return '';
+        return $this->getEnableArg($shared);
     }
 
     /**
@@ -179,41 +170,149 @@ class Extension
     }
 
     /**
+     * Patch code before ./configure.bat for Windows
+     */
+    public function patchBeforeWindowsConfigure(): bool
+    {
+        return false;
+    }
+
+    /**
      * Patch code before make
      * If you need to patch some code, overwrite this
      * return true if you patched something, false if not
      */
     public function patchBeforeMake(): bool
     {
+        if (SPCTarget::getTargetOS() === 'Linux' && $this->isBuildShared() && ($objs = getenv('SPC_EXTRA_RUNTIME_OBJECTS'))) {
+            FileSystem::replaceFileRegex(
+                SOURCE_PATH . '/php-src/Makefile',
+                "/^(shared_objects_{$this->getName()}\\s*=.*)$/m",
+                "$1 {$objs}",
+            );
+            return true;
+        }
         return false;
     }
 
     /**
-     * Run shared extension check when cli is enabled
-     * @throws RuntimeException
+     * Patch code before shared extension phpize
+     * If you need to patch some code, overwrite this
+     * return true if you patched something, false if not
      */
-    public function runSharedExtensionCheckUnix(): void
+    public function patchBeforeSharedPhpize(): bool
     {
-        [$ret] = shell()->execWithResult(BUILD_BIN_PATH . '/php -n -d "extension=' . BUILD_LIB_PATH . '/' . $this->getName() . '.so" --ri ' . $this->getName());
-        if ($ret !== 0) {
-            throw new RuntimeException($this->getName() . '.so failed to load');
-        }
-        if ($this->isBuildStatic()) {
-            logger()->warning($this->getName() . '.so test succeeded, but has little significance since it is also compiled in statically.');
-        }
+        return false;
     }
 
     /**
-     * @throws RuntimeException
+     * Patch code before shared extension ./configure
+     * If you need to patch some code, overwrite this
+     * return true if you patched something, false if not
      */
+    public function patchBeforeSharedConfigure(): bool
+    {
+        return false;
+    }
+
+    /**
+     * Patch code before shared extension make
+     * If you need to patch some code, overwrite this
+     * return true if you patched something, false if not
+     */
+    public function patchBeforeSharedMake(): bool
+    {
+        $config = (new SPCConfigUtil($this->builder))->getExtensionConfig($this);
+        [$staticLibs, $sharedLibs] = $this->splitLibsIntoStaticAndShared($config['libs']);
+        $lstdcpp = str_contains($sharedLibs, '-l:libstdc++.a') ? '-l:libstdc++.a' : null;
+        $lstdcpp ??= str_contains($sharedLibs, '-lstdc++') ? '-lstdc++' : '';
+
+        $makefileContent = file_get_contents($this->source_dir . '/Makefile');
+        if (preg_match('/^(.*_SHARED_LIBADD\s*=\s*)(.*)$/m', $makefileContent, $matches)) {
+            $prefix = $matches[1];
+            $currentLibs = trim($matches[2]);
+            $newLibs = trim("{$currentLibs} {$staticLibs} {$lstdcpp}");
+            $deduplicatedLibs = deduplicate_flags($newLibs);
+
+            FileSystem::replaceFileRegex(
+                $this->source_dir . '/Makefile',
+                '/^(.*_SHARED_LIBADD\s*=.*)$/m',
+                $prefix . $deduplicatedLibs
+            );
+        }
+
+        if ($objs = getenv('SPC_EXTRA_RUNTIME_OBJECTS')) {
+            FileSystem::replaceFileRegex(
+                $this->source_dir . '/Makefile',
+                "/^(shared_objects_{$this->getName()}\\s*=.*)$/m",
+                "$1 {$objs}",
+            );
+        }
+        return true;
+    }
+
+    /**
+     * @return string
+     *                returns a command line string with all required shared extensions to load
+     *                i.e.; pdo_pgsql would return:
+     *
+     * `-d "extension=pgsql" -d "extension=pdo_pgsql"`
+     */
+    public function getSharedExtensionLoadString(): string
+    {
+        $loaded = [];
+        $order = [];
+
+        $resolve = function ($extension) use (&$resolve, &$loaded, &$order) {
+            if (!$extension instanceof Extension) {
+                return;
+            }
+            if (isset($loaded[$extension->getName()])) {
+                return;
+            }
+            $loaded[$extension->getName()] = true;
+
+            foreach ($extension->dependencies as $dependency) {
+                $resolve($dependency);
+            }
+
+            $order[] = $extension;
+        };
+
+        $resolve($this);
+
+        $ret = '';
+        foreach ($order as $ext) {
+            if ($ext instanceof self && $ext->isBuildShared()) {
+                if (Config::getExt($ext->getName(), 'type', false) === 'addon') {
+                    continue;
+                }
+                if (Config::getExt($ext->getName(), 'zend-extension', false) === true) {
+                    $ret .= " -d \"zend_extension={$ext->getName()}\"";
+                } else {
+                    $ret .= " -d \"extension={$ext->getName()}\"";
+                }
+            }
+        }
+
+        if ($ret !== '') {
+            $ret = ' -d "extension_dir=' . BUILD_MODULES_PATH . '"' . $ret;
+        }
+
+        return $ret;
+    }
+
     public function runCliCheckUnix(): void
     {
         // Run compile check if build target is cli
         // If you need to run some check, overwrite this or add your assert in src/globals/ext-tests/{extension_name}.php
-        // If check failed, throw RuntimeException
-        [$ret] = shell()->execWithResult(BUILD_ROOT_PATH . '/bin/php -n --ri "' . $this->getDistName() . '"', false);
+        $sharedExtensions = $this->getSharedExtensionLoadString();
+        [$ret] = shell()->execWithResult(BUILD_BIN_PATH . '/php -n' . $sharedExtensions . ' --ri "' . $this->getDistName() . '"');
         if ($ret !== 0) {
-            throw new RuntimeException('extension ' . $this->getName() . ' failed compile check: php-cli returned ' . $ret);
+            throw new ValidationException(
+                "extension {$this->getName()} failed compile check: php-cli returned {$ret}",
+                validation_module: 'Extension ' . $this->getName() . ' sanity check'
+            );
         }
 
         if (file_exists(ROOT_DIR . '/src/globals/ext-tests/' . $this->getName() . '.php')) {
@@ -224,27 +323,23 @@ class Extension
                 file_get_contents(ROOT_DIR . '/src/globals/ext-tests/' . $this->getName() . '.php')
             );
 
-            [$ret, $out] = shell()->execWithResult(BUILD_ROOT_PATH . '/bin/php -n -r "' . trim($test) . '"');
+            [$ret, $out] = shell()->execWithResult(BUILD_BIN_PATH . '/php -n' . $sharedExtensions . ' -r "' . trim($test) . '"');
             if ($ret !== 0) {
-                if ($this->builder->getOption('debug')) {
-                    var_dump($out);
-                }
-                throw new RuntimeException('extension ' . $this->getName() . ' failed sanity check');
+                throw new ValidationException(
+                    "extension {$this->getName()} failed sanity check. Code: {$ret}, output: " . implode("\n", $out),
+                    validation_module: 'Extension ' . $this->getName() . ' function check'
+                );
             }
         }
     }
 
-    /**
-     * @throws RuntimeException
-     */
     public function runCliCheckWindows(): void
     {
         // Run compile check if build target is cli
         // If you need to run some check, overwrite this or add your assert in src/globals/ext-tests/{extension_name}.php
-        // If check failed, throw RuntimeException
-        [$ret] = cmd()->execWithResult(BUILD_ROOT_PATH . '/bin/php.exe -n --ri "' . $this->getDistName() . '"', false);
+        [$ret] = cmd()->execWithResult(BUILD_BIN_PATH . '/php.exe -n --ri "' . $this->getDistName() . '"', false);
         if ($ret !== 0) {
-            throw new RuntimeException('extension ' . $this->getName() . ' failed compile check: php-cli returned ' . $ret);
+            throw new ValidationException("extension {$this->getName()} failed compile check: php-cli returned {$ret}", validation_module: "Extension {$this->getName()} sanity check");
         }
 
         if (file_exists(FileSystem::convertPath(ROOT_DIR . '/src/globals/ext-tests/' . $this->getName() . '.php'))) {
@@ -257,7 +352,10 @@ class Extension
 
             [$ret] = cmd()->execWithResult(BUILD_ROOT_PATH . '/bin/php.exe -n -r "' . trim($test) . '"');
             if ($ret !== 0) {
-                throw new RuntimeException('extension ' . $this->getName() . ' failed sanity check');
+                throw new ValidationException(
+                    "extension {$this->getName()} failed function check",
+                    validation_module: "Extension {$this->getName()} function check"
+                );
             }
         }
     }
@@ -269,49 +367,105 @@ class Extension
 
     /**
      * Build shared extension
-     *
-     * @throws WrongUsageException
-     * @throws RuntimeException
      */
-    public function buildShared(): void
+    public function buildShared(array $visited = []): void
     {
-        match (PHP_OS_FAMILY) {
-            'Darwin', 'Linux' => $this->buildUnixShared(),
-            default => throw new WrongUsageException(PHP_OS_FAMILY . ' build shared extensions is not supported yet'),
-        };
+        try {
+            if (Config::getExt($this->getName(), 'type') === 'builtin' || Config::getExt($this->getName(), 'build-with-php') === true) {
+                if (file_exists(BUILD_MODULES_PATH . '/' . $this->getName() . '.so')) {
+                    logger()->info('Shared extension [' . $this->getName() . '] was already built by php-src/configure (' . $this->getName() . '.so)');
+                    return;
+                }
+                if (Config::getExt($this->getName(), 'build-with-php') === true) {
+                    logger()->warning('Shared extension [' . $this->getName() . '] did not build with php-src/configure (' . $this->getName() . '.so)');
+                    logger()->warning('Try deleting your build and source folders and running `spc build`` again.');
+                    return;
+                }
+            }
+            if (file_exists(BUILD_MODULES_PATH . '/' . $this->getName() . '.so')) {
+                logger()->info('Shared extension [' . $this->getName() . '] was already built, skipping (' . $this->getName() . '.so)');
+                return;
+            }
+            if ((string) Config::getExt($this->getName(), 'type') === 'addon') {
+                return;
+            }
+            logger()->info('Building extension [' . $this->getName() . '] as shared extension (' . $this->getName() . '.so)');
+            foreach ($this->dependencies as $dependency) {
+                if (!$dependency instanceof Extension) {
+                    continue;
+                }
+                if (!$dependency->isBuildStatic() && !in_array($dependency->getName(), $visited)) {
+                    logger()->info('extension ' . $this->getName() . ' requires extension ' . $dependency->getName());
+                    $dependency->buildShared([...$visited, $this->getName()]);
+                }
+            }
+            $this->builder->emitPatchPoint('before-shared-ext[' . $this->getName() . ']-build');
+            match (PHP_OS_FAMILY) {
+                'Darwin', 'Linux' => $this->buildUnixShared(),
+                default => throw new WrongUsageException(PHP_OS_FAMILY . ' build shared extensions is not supported yet'),
+            };
+            $this->builder->emitPatchPoint('after-shared-ext[' . $this->getName() . ']-build');
+        } catch (SPCException $e) {
+            $e->bindExtensionInfo(['extension_name' => $this->getName()]);
+            throw $e;
+        }
     }
 
     /**
      * Build shared extension for Unix
-     *
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     * @throws \ReflectionException
-     * @throws \Throwable
      */
     public function buildUnixShared(): void
     {
-        $config = (new SPCConfigUtil($this->builder))->config([$this->getName()]);
-        $env = [
-            'CFLAGS' => $config['cflags'],
-            'LDFLAGS' => $config['ldflags'],
-            'LIBS' => $config['libs'],
-        ];
+        $env = $this->getSharedExtensionEnv();
+        if ($this->patchBeforeSharedPhpize()) {
+            logger()->info("Extension [{$this->getName()}] patched before shared phpize");
+        }
+
         // prepare configure args
         shell()->cd($this->source_dir)
             ->setEnv($env)
-            ->execWithEnv(BUILD_BIN_PATH . '/phpize')
-            ->execWithEnv('./configure ' . $this->getUnixConfigureArg(true) . ' --with-php-config=' . BUILD_BIN_PATH . '/php-config --enable-shared --disable-static')
-            ->execWithEnv('make clean')
-            ->execWithEnv('make -j' . $this->builder->concurrency);
+            ->appendEnv($this->getExtraEnv())
+            ->exec(BUILD_BIN_PATH . '/phpize');
 
-        // copy shared library
-        copy($this->source_dir . '/modules/' . $this->getDistName() . '.so', BUILD_LIB_PATH . '/' . $this->getDistName() . '.so');
-        // check shared extension with php-cli
-        if (file_exists(BUILD_BIN_PATH . '/php')) {
-            $this->runSharedExtensionCheckUnix();
+        if ($this->patchBeforeSharedConfigure()) {
+            logger()->info("Extension [{$this->getName()}] patched before shared configure");
         }
+
+        $phpvars = getenv('SPC_EXTRA_PHP_VARS') ?: '';
+
+        shell()->cd($this->source_dir)
+            ->setEnv($env)
+            ->appendEnv($this->getExtraEnv())
+            ->exec(
+                './configure ' . $this->getUnixConfigureArg(true) .
+                ' --with-php-config=' . BUILD_BIN_PATH . '/php-config ' .
+                "--enable-shared --disable-static {$phpvars}"
+            );
+
+        if ($this->patchBeforeSharedMake()) {
+            logger()->info("Extension [{$this->getName()}] patched before shared make");
+        }
+
+        shell()->cd($this->source_dir)
+            ->setEnv($env)
+            ->appendEnv($this->getExtraEnv())
+            ->exec('make clean')
+            ->exec('make -j' . $this->builder->concurrency)
+            ->exec('make install');
+
+        // process *.so file
+        $soFile = BUILD_MODULES_PATH . '/' . $this->getName() . '.so';
+        $soDest = $soFile;
+        preg_match('/-release\s+(\S*)/', getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS'), $matches);
+        if (!empty($matches[1])) {
+            $soDest = str_replace('.so', '-' . $matches[1] . '.so', $soFile);
+        }
+        if (!file_exists($soFile)) {
+            throw new ValidationException("extension {$this->getName()} build failed: {$soFile} not found", validation_module: "Extension {$this->getName()} build");
+        }
+        /** @var UnixBuilderBase $builder */
+        $builder = $this->builder;
+        $builder->deployBinary($soFile, $soDest, false);
     }
 
     /**
@@ -351,38 +505,11 @@ class Extension
     }
 
     /**
-     * @throws RuntimeException
+     * Get the library dependencies that current extension depends on.
+     *
+     * @param bool $recursive Whether it includes dependencies recursively
      */
-    protected function addLibraryDependency(string $name, bool $optional = false): void
-    {
-        $depLib = $this->builder->getLib($name);
-        if (!$depLib) {
-            if (!$optional) {
-                throw new RuntimeException("extension {$this->name} requires library {$name}");
-            }
-            logger()->info("enabling {$this->name} without library {$name}");
-        } else {
-            $this->dependencies[] = $depLib;
-        }
-    }
-
-    /**
-     * @throws RuntimeException
-     */
-    protected function addExtensionDependency(string $name, bool $optional = false): void
-    {
-        $depExt = $this->builder->getExt($name);
-        if (!$depExt) {
-            if (!$optional) {
-                throw new RuntimeException("{$this->name} requires extension {$name}");
-            }
-            logger()->info("enabling {$this->name} without extension {$name}");
-        } else {
-            $this->dependencies[] = $depExt;
-        }
-    }
-
-    private function getLibraryDependencies(bool $recursive = false): array
+    public function getLibraryDependencies(bool $recursive = false): array
     {
         $ret = array_filter($this->dependencies, fn ($x) => $x instanceof LibraryBase);
         if (!$recursive) {
@@ -396,17 +523,95 @@ class Extension
             $added = 0;
             foreach ($ret as $depName => $dep) {
                 foreach ($dep->getDependencies(true) as $depdepName => $depdep) {
-                    if (!in_array($depdepName, array_keys($deps), true)) {
+                    if (!array_key_exists($depdepName, $deps)) {
                         $deps[$depdepName] = $depdep;
                         ++$added;
                     }
                 }
-                if (!in_array($depName, array_keys($deps), true)) {
+                if (!array_key_exists($depName, $deps)) {
                     $deps[$depName] = $dep;
                 }
             }
         }
 
         return $deps;
+    }
+
+    /**
+     * Returns the environment variables a shared extension needs to be built.
+     * CFLAGS, CXXFLAGS, LDFLAGS and so on.
+     */
+    protected function getSharedExtensionEnv(): array
+    {
+        $config = (new SPCConfigUtil($this->builder, ['no_php' => true]))->getExtensionConfig($this);
+        [$staticLibs, $sharedLibs] = $this->splitLibsIntoStaticAndShared($config['libs']);
+        $preStatic = PHP_OS_FAMILY === 'Darwin' ? '' : '-Wl,--start-group ';
+        $postStatic = PHP_OS_FAMILY === 'Darwin' ? '' : ' -Wl,--end-group ';
+        return [
+            'CFLAGS' => $config['cflags'],
+            'CXXFLAGS' => $config['cflags'],
+            'LDFLAGS' => $config['ldflags'],
+            'EXTRA_LDFLAGS' => getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS'),
+            'LIBS' => clean_spaces("{$preStatic} {$staticLibs} {$postStatic} {$sharedLibs}"),
+            'LD_LIBRARY_PATH' => BUILD_LIB_PATH,
+        ];
+    }
+
+    protected function addLibraryDependency(string $name, bool $optional = false): void
+    {
+        $depLib = $this->builder->getLib($name);
+        if (!$depLib) {
+            if (!$optional) {
+                throw new WrongUsageException("extension {$this->name} requires library {$name}");
+            }
+            logger()->info("enabling {$this->name} without library {$name}");
+        } else {
+            $this->dependencies[$name] = $depLib;
+        }
+    }
+
+    protected function addExtensionDependency(string $name, bool $optional = false): void
+    {
+        $depExt = $this->builder->getExt($name);
+        if (!$depExt) {
+            if (!$optional) {
+                throw new WrongUsageException("{$this->name} requires extension {$name} which is not included");
+            }
+            logger()->info("enabling {$this->name} without extension {$name}");
+        } else {
+            $this->dependencies[$name] = $depExt;
+        }
+    }
+
+    protected function getExtraEnv(): array
+    {
+        return [];
+    }
+
+    /**
+     * Splits a given string of library flags into static and shared libraries.
+     *
+     * @param  string $allLibs A space-separated string of library flags (e.g., -lxyz).
+     * @return array  an array containing two elements: the first is a space-separated string
+     *                of static library flags, and the second is a space-separated string
+     *                of shared library flags
+     */
+    protected function splitLibsIntoStaticAndShared(string $allLibs): array
+    {
+        $staticLibString = '';
+        $sharedLibString = '';
+        $libs = explode(' ', $allLibs);
+        foreach ($libs as $lib) {
+            $staticLib = BUILD_LIB_PATH . '/lib' . str_replace('-l', '', $lib) . '.a';
+            if (str_starts_with($lib, BUILD_LIB_PATH . '/lib') && str_ends_with($lib, '.a')) {
+                $staticLib = $lib;
+            }
+            if ($lib === '-lphp' || !file_exists($staticLib)) {
+                $sharedLibString .= " {$lib}";
+            } else {
+                $staticLibString .= " {$lib}";
+            }
+        }
+        return [trim($staticLibString), trim($sharedLibString)];
     }
 }

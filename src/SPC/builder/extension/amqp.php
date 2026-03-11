@@ -13,6 +13,7 @@ class amqp extends Extension
 {
     public function patchBeforeMake(): bool
     {
+        $patched = parent::patchBeforeMake();
         if (PHP_OS_FAMILY === 'Windows') {
             FileSystem::replaceFileRegex(BUILD_INCLUDE_PATH . '\amqp.h', '/^#warning.*/m', '');
             FileSystem::replaceFileRegex(BUILD_INCLUDE_PATH . '\amqp_framing.h', '/^#warning.*/m', '');
@@ -20,15 +21,15 @@ class amqp extends Extension
             FileSystem::replaceFileRegex(BUILD_INCLUDE_PATH . '\amqp_tcp_socket.h', '/^#warning.*/m', '');
             return true;
         }
-        return false;
+        return $patched;
     }
 
     public function getUnixConfigureArg(bool $shared = false): string
     {
-        return '--with-amqp --with-librabbitmq-dir=' . BUILD_ROOT_PATH;
+        return '--with-amqp' . ($shared ? '=shared' : '') . ' --with-librabbitmq-dir=' . BUILD_ROOT_PATH;
     }
 
-    public function getWindowsConfigureArg(): string
+    public function getWindowsConfigureArg($shared = false): string
     {
         return '--with-amqp';
     }

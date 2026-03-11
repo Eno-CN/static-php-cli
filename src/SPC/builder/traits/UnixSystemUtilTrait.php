@@ -4,75 +4,100 @@ declare(strict_types=1);
 
 namespace SPC\builder\traits;
 
-use SPC\exception\FileSystemException;
-use SPC\store\FileSystem;
+use SPC\exception\ExecutionException;
+use SPC\exception\SPCInternalException;
+use SPC\exception\WrongUsageException;
+use SPC\toolchain\ToolchainManager;
+use SPC\toolchain\ZigToolchain;
+use SPC\util\SPCTarget;
 
-/**
- * Unix 系统的工具函数 Trait，适用于 Linux、macOS
- */
 trait UnixSystemUtilTrait
 {
     /**
-     * 生成 toolchain.cmake，用于 cmake 构建
+     * Export static library dynamic symbols to a .dynsym file.
+     * It will export to "/path/to/libxxx.a.dynsym".
      *
-     * @param  string              $os          操作系统代号
-     * @param  string              $target_arch 目标架构
-     * @param  string              $cflags      CFLAGS 参数
-     * @param  null|string         $cc          CC 参数（默认空）
-     * @param  null|string         $cxx         CXX 参数（默认空）
-     * @throws FileSystemException
+     * @param string $lib_file Static library file path (e.g. /path/to/libxxx.a)
      */
-    public static function makeCmakeToolchainFile(
-        string $os,
-        string $target_arch,
-        string $cflags,
-        ?string $cc = null,
-        ?string $cxx = null
-    ): string {
-        logger()->debug("making cmake tool chain file for {$os} {$target_arch} with CFLAGS='{$cflags}'");
-        $root = BUILD_ROOT_PATH;
-        $ccLine = '';
-        if ($cc) {
-            $ccLine = 'SET(CMAKE_C_COMPILER ' . $cc . ')';
+    public static function exportDynamicSymbols(string $lib_file): void
+    {
+        // check
+        if (!is_file($lib_file)) {
+            throw new WrongUsageException("The lib archive file {$lib_file} does not exist, please build it first.");
         }
-        $cxxLine = '';
-        if ($cxx) {
-            $cxxLine = 'SET(CMAKE_CXX_COMPILER ' . $cxx . ')';
+        // shell out
+        $cmd = 'nm -g --defined-only -P ' . escapeshellarg($lib_file);
+        $result = shell()->execWithResult($cmd);
+        if ($result[0] !== 0) {
+            throw new ExecutionException($cmd, 'Failed to get defined symbols from ' . $lib_file);
         }
-        $toolchain = <<<CMAKE
-{$ccLine}
-{$cxxLine}
-SET(CMAKE_C_FLAGS "{$cflags}")
-SET(CMAKE_CXX_FLAGS "{$cflags}")
-SET(CMAKE_FIND_ROOT_PATH "{$root}")
-SET(CMAKE_PREFIX_PATH "{$root}")
-SET(CMAKE_INSTALL_PREFIX "{$root}")
-SET(CMAKE_INSTALL_LIBDIR "lib")
-
-set(PKG_CONFIG_EXECUTABLE "{$root}/bin/pkg-config")
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-set(CMAKE_EXE_LINKER_FLAGS "-ldl -lpthread -lm -lutil")
-CMAKE;
-        // 有时候系统的 cmake 找不到 ar 命令，真奇怪
-        if (PHP_OS_FAMILY === 'Linux') {
-            $toolchain .= "\nSET(CMAKE_AR \"ar\")";
+        // parse shell output and filter
+        $defined = [];
+        foreach ($result[1] as $line) {
+            $line = trim($line);
+            if ($line === '' || str_ends_with($line, '.o:') || str_ends_with($line, '.o]:')) {
+                continue;
+            }
+            $name = strtok($line, " \t");
+            if (!$name) {
+                continue;
+            }
+            $name = preg_replace('/@.*$/', '', $name);
+            if ($name !== '' && $name !== false) {
+                $defined[] = $name;
+            }
         }
-        FileSystem::writeFile(SOURCE_PATH . '/toolchain.cmake', $toolchain);
-        return realpath(SOURCE_PATH . '/toolchain.cmake');
+        $defined = array_unique($defined);
+        sort($defined);
+        // export
+        if (SPCTarget::getTargetOS() === 'Linux') {
+            file_put_contents("{$lib_file}.dynsym", "{\n" . implode("\n", array_map(fn ($x) => "  {$x};", $defined)) . "};\n");
+        } else {
+            file_put_contents("{$lib_file}.dynsym", implode("\n", $defined) . "\n");
+        }
     }
 
     /**
-     * @param  string      $name  命令名称
-     * @param  array       $paths 寻找的目标路径（如果不传入，则使用环境变量 PATH）
-     * @return null|string 找到了返回命令路径，找不到返回 null
+     * Get linker flag to export dynamic symbols from a static library.
+     *
+     * @param  string      $lib_file Static library file path (e.g. /path/to/libxxx.a)
+     * @return null|string Linker flag to export dynamic symbols, null if no .dynsym file found
+     */
+    public static function getDynamicExportedSymbols(string $lib_file): ?string
+    {
+        $symbol_file = "{$lib_file}.dynsym";
+        if (!is_file($symbol_file)) {
+            self::exportDynamicSymbols($lib_file);
+        }
+        if (!is_file($symbol_file)) {
+            throw new SPCInternalException("The symbol file {$symbol_file} does not exist, please check if nm command is available.");
+        }
+        // https://github.com/ziglang/zig/issues/24662
+        if (ToolchainManager::getToolchainClass() === ZigToolchain::class) {
+            return '-Wl,--export-dynamic'; // needs release 0.16, can be removed then
+        }
+        // macOS/zig
+        if (SPCTarget::getTargetOS() !== 'Linux' || ToolchainManager::getToolchainClass() === ZigToolchain::class) {
+            return "-Wl,-exported_symbols_list,{$symbol_file}";
+        }
+        return "-Wl,--dynamic-list={$symbol_file}";
+    }
+
+    /**
+     * Find a command in given paths or system PATH.
+     * If $name is an absolute path, check if it exists.
+     *
+     * @param  string      $name  Command name or absolute path
+     * @param  array       $paths Paths to search, if empty, use system PATH
+     * @return null|string Absolute path of the command if found, null otherwise
      */
     public static function findCommand(string $name, array $paths = []): ?string
     {
         if (!$paths) {
             $paths = explode(PATH_SEPARATOR, getenv('PATH'));
+        }
+        if (str_starts_with($name, '/')) {
+            return file_exists($name) ? $name : null;
         }
         foreach ($paths as $path) {
             if (file_exists($path . DIRECTORY_SEPARATOR . $name)) {
@@ -83,6 +108,8 @@ CMAKE;
     }
 
     /**
+     * Make environment variable string for shell command.
+     *
      * @param  array  $vars Variables, like: ["CFLAGS" => "-Ixxx"]
      * @return string like: CFLAGS="-Ixxx"
      */

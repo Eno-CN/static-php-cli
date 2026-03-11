@@ -5,52 +5,47 @@ declare(strict_types=1);
 namespace SPC\store;
 
 use SPC\builder\BuilderBase;
-use SPC\builder\linux\LinuxBuilder;
 use SPC\builder\linux\SystemUtil;
 use SPC\builder\unix\UnixBuilderBase;
+use SPC\builder\windows\WindowsBuilder;
+use SPC\exception\ExecutionException;
 use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
-use SPC\exception\WrongUsageException;
+use SPC\exception\PatchException;
+use SPC\util\SPCTarget;
 
 class SourcePatcher
 {
     public static function init(): void
     {
-        // FileSystem::addSourceExtractHook('swow', [SourcePatcher::class, 'patchSwow']);
-        FileSystem::addSourceExtractHook('micro', [SourcePatcher::class, 'patchMicro']);
-        FileSystem::addSourceExtractHook('openssl', [SourcePatcher::class, 'patchOpenssl11Darwin']);
-        FileSystem::addSourceExtractHook('swoole', [SourcePatcher::class, 'patchSwoole']);
-        FileSystem::addSourceExtractHook('php-src', [SourcePatcher::class, 'patchPhpLibxml212']);
-        FileSystem::addSourceExtractHook('php-src', [SourcePatcher::class, 'patchGDWin32']);
-        FileSystem::addSourceExtractHook('sqlsrv', [SourcePatcher::class, 'patchSQLSRVWin32']);
-        FileSystem::addSourceExtractHook('pdo_sqlsrv', [SourcePatcher::class, 'patchSQLSRVWin32']);
-        FileSystem::addSourceExtractHook('yaml', [SourcePatcher::class, 'patchYamlWin32']);
-        FileSystem::addSourceExtractHook('libyaml', [SourcePatcher::class, 'patchLibYaml']);
-        FileSystem::addSourceExtractHook('php-src', [SourcePatcher::class, 'patchImapLicense']);
-        FileSystem::addSourceExtractHook('ext-imagick', [SourcePatcher::class, 'patchImagickWith84']);
-        FileSystem::addSourceExtractHook('libaom', [SourcePatcher::class, 'patchLibaomForAlpine']);
-        FileSystem::addSourceExtractHook('attr', [SourcePatcher::class, 'patchAttrForAlpine']);
-        FileSystem::addSourceExtractHook('gmssl', [SourcePatcher::class, 'patchGMSSL']);
+        // FileSystem::addSourceExtractHook('swow', [__CLASS__, 'patchSwow']);
+        FileSystem::addSourceExtractHook('openssl', [__CLASS__, 'patchOpenssl11Darwin']);
+        FileSystem::addSourceExtractHook('swoole', [__CLASS__, 'patchSwoole']);
+        FileSystem::addSourceExtractHook('php-src', [__CLASS__, 'patchPhpLibxml212']);
+        FileSystem::addSourceExtractHook('php-src', [__CLASS__, 'patchGDWin32']);
+        // FileSystem::addSourceExtractHook('php-src', [__CLASS__, 'patchFfiCentos7FixO3strncmp']);
+        FileSystem::addSourceExtractHook('sqlsrv', [__CLASS__, 'patchSQLSRVWin32']);
+        FileSystem::addSourceExtractHook('pdo_sqlsrv', [__CLASS__, 'patchSQLSRVWin32']);
+        FileSystem::addSourceExtractHook('pdo_sqlsrv', [__CLASS__, 'patchSQLSRVPhp85']);
+        FileSystem::addSourceExtractHook('yaml', [__CLASS__, 'patchYamlWin32']);
+        FileSystem::addSourceExtractHook('libyaml', [__CLASS__, 'patchLibYaml']);
+        FileSystem::addSourceExtractHook('php-src', [__CLASS__, 'patchImapLicense']);
+        FileSystem::addSourceExtractHook('ext-imagick', [__CLASS__, 'patchImagickWith84']);
+        FileSystem::addSourceExtractHook('libaom', [__CLASS__, 'patchLibaomForAlpine']);
+        FileSystem::addSourceExtractHook('pkg-config', [__CLASS__, 'patchPkgConfigForGcc15']);
+        FileSystem::addSourceExtractHook('attr', [__CLASS__, 'patchAttrForAlpine']);
+        FileSystem::addSourceExtractHook('gmssl', [__CLASS__, 'patchGMSSL']);
     }
 
-    /**
-     * Source patcher runner before buildconf
-     *
-     * @param  BuilderBase         $builder Builder
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     */
     public static function patchBeforeBuildconf(BuilderBase $builder): void
     {
-        foreach ($builder->getExts(false) as $ext) {
+        foreach ($builder->getExts() as $ext) {
             if ($ext->patchBeforeBuildconf() === true) {
-                logger()->info('Extension [' . $ext->getName() . '] patched before buildconf');
+                logger()->info("Extension [{$ext->getName()}] patched before buildconf");
             }
         }
         foreach ($builder->getLibs() as $lib) {
             if ($lib->patchBeforeBuildconf() === true) {
-                logger()->info('Library [' . $lib->getName() . '] patched before buildconf');
+                logger()->info("Library [{$lib->getName()}] patched before buildconf");
             }
         }
         // patch windows php 8.1 bug
@@ -68,46 +63,75 @@ class SourcePatcher
             );
         }
 
+        // Fix PHP VS version
+        if ($builder instanceof WindowsBuilder) {
+            // get vs version
+            $vc = \SPC\builder\windows\SystemUtil::findVisualStudio();
+            $vc_matches = match ($vc['version']) {
+                'vs17' => ['VS17', 'Visual C++ 2022'],
+                'vs16' => ['VS16', 'Visual C++ 2019'],
+                default => ['unknown', 'unknown'],
+            };
+            // patch php-src/win32/build/confutils.js
+            FileSystem::replaceFileStr(
+                SOURCE_PATH . '\php-src\win32\build\confutils.js',
+                'var name = "unknown";',
+                "var name = short ? \"{$vc_matches[0]}\" : \"{$vc_matches[1]}\";return name;"
+            );
+        }
+
+        // patch configure.ac
+        $musl = SPCTarget::getLibc() === 'musl';
+        FileSystem::backupFile(SOURCE_PATH . '/php-src/configure.ac');
+        FileSystem::replaceFileStr(
+            SOURCE_PATH . '/php-src/configure.ac',
+            'if command -v ldd >/dev/null && ldd --version 2>&1 | grep ^musl >/dev/null 2>&1',
+            'if ' . ($musl ? 'true' : 'false')
+        );
+        if (getenv('SPC_LIBC') === false && ($libc = SPCTarget::getLibc()) !== null) {
+            putenv("SPC_LIBC={$libc}");
+        }
+
         // patch php-src/build/php.m4 PKG_CHECK_MODULES -> PKG_CHECK_MODULES_STATIC
         FileSystem::replaceFileStr(SOURCE_PATH . '/php-src/build/php.m4', 'PKG_CHECK_MODULES(', 'PKG_CHECK_MODULES_STATIC(');
 
         if ($builder->getOption('enable-micro-win32')) {
-            SourcePatcher::patchMicroWin32();
+            self::patchMicroWin32();
         } else {
-            SourcePatcher::unpatchMicroWin32();
+            self::unpatchMicroWin32();
         }
     }
 
     /**
      * Source patcher runner before configure
      *
-     * @param  BuilderBase         $builder Builder
-     * @throws FileSystemException
+     * @param BuilderBase $builder Builder
      */
     public static function patchBeforeConfigure(BuilderBase $builder): void
     {
-        foreach ($builder->getExts(false) as $ext) {
-            if ($ext->patchBeforeConfigure() === true) {
-                logger()->info('Extension [' . $ext->getName() . '] patched before configure');
+        foreach ($builder->getExts() as $ext) {
+            $patch = $builder instanceof WindowsBuilder ? $ext->patchBeforeWindowsConfigure() : $ext->patchBeforeConfigure();
+            if ($patch === true) {
+                logger()->info("Extension [{$ext->getName()}] patched before configure");
             }
         }
         foreach ($builder->getLibs() as $lib) {
             if ($lib->patchBeforeConfigure() === true) {
-                logger()->info('Library [' . $lib->getName() . '] patched before configure');
+                logger()->info("Library [{$lib->getName()}] patched before configure");
             }
         }
         // patch capstone
-        FileSystem::replaceFileRegex(SOURCE_PATH . '/php-src/configure', '/have_capstone="yes"/', 'have_capstone="no"');
-        if ($builder instanceof LinuxBuilder && getenv('SPC_LIBC') === 'glibc') {
-            FileSystem::replaceFileStr(SOURCE_PATH . '/php-src/Zend/zend_operators.h', '# define ZEND_USE_ASM_ARITHMETIC 1', '# define ZEND_USE_ASM_ARITHMETIC 0');
+        if (is_unix()) {
+            FileSystem::replaceFileRegex(SOURCE_PATH . '/php-src/configure', '/have_capstone="yes"/', 'have_capstone="no"');
+        }
+
+        if (file_exists(SOURCE_PATH . '/php-src/configure.ac.bak')) {
+            // restore configure.ac
+            FileSystem::restoreBackupFile(SOURCE_PATH . '/php-src/configure.ac');
         }
     }
 
-    /**
-     * @throws RuntimeException
-     * @throws FileSystemException
-     */
-    public static function patchMicro(string $name = '', string $target = '', ?array $items = null): bool
+    public static function patchMicro(?array $items = null): bool
     {
         if (!file_exists(SOURCE_PATH . '/php-src/sapi/micro/php_micro.c')) {
             return false;
@@ -133,9 +157,10 @@ class SourcePatcher
             $spc_micro_patches = getenv('SPC_MICRO_PATCHES');
             $spc_micro_patches = $spc_micro_patches === false ? [] : explode(',', $spc_micro_patches);
         }
+        $spc_micro_patches = array_filter($spc_micro_patches, fn ($item) => trim((string) $item) !== '');
         $patch_list = $spc_micro_patches;
         $patches = [];
-        $serial = ['80', '81', '82', '83', '84'];
+        $serial = ['80', '81', '82', '83', '84', '85'];
         foreach ($patch_list as $patchName) {
             if (file_exists(SOURCE_PATH . "/php-src/sapi/micro/patches/{$patchName}.patch")) {
                 $patches[] = "sapi/micro/patches/{$patchName}.patch";
@@ -149,16 +174,12 @@ class SourcePatcher
                 $patches[] = "sapi/micro/patches/{$patchName}_{$tryMajMin}.patch";
                 continue 2;
             }
-            throw new RuntimeException("failed finding patch {$patchName}");
+            throw new PatchException('phpmicro patches', "Failed finding patch file or versioned file {$patchName} !");
         }
 
         foreach ($patches as $patch) {
             logger()->info("Patching micro with {$patch}");
-            $patchesStr = str_replace('/', DIRECTORY_SEPARATOR, $patch);
-            f_passthru(
-                'cd ' . SOURCE_PATH . '/php-src && ' .
-                (PHP_OS_FAMILY === 'Windows' ? 'type' : 'cat') . ' ' . $patchesStr . ' | patch -p1 '
-            );
+            self::patchFile(SOURCE_PATH . "/php-src/{$patch}", SOURCE_PATH . '/php-src');
         }
 
         return true;
@@ -167,50 +188,59 @@ class SourcePatcher
     /**
      * Use existing patch file for patching
      *
-     * @param  string           $patch_name Patch file name in src/globals/patch/
-     * @param  string           $cwd        Working directory for patch command
-     * @param  bool             $reverse    Reverse patches (default: False)
-     * @throws RuntimeException
+     * @param string $patch_name Patch file name in src/globals/patch/ or absolute path
+     * @param string $cwd        Working directory for patch command
+     * @param bool   $reverse    Reverse patches (default: False)
      */
     public static function patchFile(string $patch_name, string $cwd, bool $reverse = false): bool
     {
-        if (!file_exists(ROOT_DIR . "/src/globals/patch/{$patch_name}")) {
-            return false;
-        }
+        try {
+            if (FileSystem::isRelativePath($patch_name)) {
+                $patch_file = ROOT_DIR . "/src/globals/patch/{$patch_name}";
+            } else {
+                $patch_file = $patch_name;
+            }
+            if (!file_exists($patch_file)) {
+                return false;
+            }
 
-        $patch_file = ROOT_DIR . "/src/globals/patch/{$patch_name}";
-        $patch_str = str_replace('/', DIRECTORY_SEPARATOR, $patch_file);
+            $patch_str = FileSystem::convertPath($patch_file);
+            if (!file_exists($patch_str)) {
+                throw new PatchException($patch_name, "Patch file [{$patch_str}] does not exist");
+            }
 
-        // Copy patch from phar
-        if (\Phar::running() !== '') {
-            file_put_contents(SOURCE_PATH . '/' . $patch_name, file_get_contents($patch_file));
-            $patch_str = str_replace('/', DIRECTORY_SEPARATOR, SOURCE_PATH . '/' . $patch_name);
-        }
+            // Copy patch from phar
+            if (str_starts_with($patch_str, 'phar://')) {
+                $filename = pathinfo($patch_file, PATHINFO_BASENAME);
+                file_put_contents(SOURCE_PATH . "/{$filename}", file_get_contents($patch_file));
+                $patch_str = FileSystem::convertPath(SOURCE_PATH . "/{$filename}");
+            }
 
-        // detect
-        $detect_reverse = !$reverse;
-        $detect_cmd = 'cd ' . escapeshellarg($cwd) . ' && '
-            . (PHP_OS_FAMILY === 'Windows' ? 'type' : 'cat') . ' ' . escapeshellarg($patch_str)
-            . ' | patch --dry-run -p1 -s -f ' . ($detect_reverse ? '-R' : '')
-            . ' > ' . (PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null') . ' 2>&1';
-        exec($detect_cmd, $output, $detect_status);
+            // detect
+            $detect_reverse = !$reverse;
+            $detect_cmd = 'cd ' . escapeshellarg($cwd) . ' && '
+                . (PHP_OS_FAMILY === 'Windows' ? 'type' : 'cat') . ' ' . escapeshellarg($patch_str)
+                . ' | patch --dry-run -p1 -s -f ' . ($detect_reverse ? '-R' : '')
+                . ' > ' . (PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null') . ' 2>&1';
+            exec($detect_cmd, $output, $detect_status);
 
-        if ($detect_status === 0) {
+            if ($detect_status === 0) {
+                return true;
+            }
+
+            // apply patch
+            $apply_cmd = 'cd ' . escapeshellarg($cwd) . ' && '
+                . (PHP_OS_FAMILY === 'Windows' ? 'type' : 'cat') . ' ' . escapeshellarg($patch_str)
+                . ' | patch -p1 ' . ($reverse ? '-R' : '');
+
+            f_passthru($apply_cmd);
             return true;
+        } catch (ExecutionException $e) {
+            // If patch failed, throw exception
+            throw new PatchException($patch_name, "Patch file [{$patch_name}] failed to apply", previous: $e);
         }
-
-        // apply patch
-        $apply_cmd = 'cd ' . escapeshellarg($cwd) . ' && '
-            . (PHP_OS_FAMILY === 'Windows' ? 'type' : 'cat') . ' ' . escapeshellarg($patch_str)
-            . ' | patch -p1 ' . ($reverse ? '-R' : '');
-
-        f_passthru($apply_cmd);
-        return true;
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchOpenssl11Darwin(): bool
     {
         if (PHP_OS_FAMILY === 'Darwin' && !file_exists(SOURCE_PATH . '/openssl/VERSION.dat') && file_exists(SOURCE_PATH . '/openssl/test/v3ext.c')) {
@@ -220,9 +250,6 @@ class SourcePatcher
         return false;
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchSwoole(): bool
     {
         // swoole hook needs pdo/pdo.h
@@ -231,6 +258,7 @@ class SourcePatcher
             'PHP_ADD_INCLUDE([$ext_srcdir])',
             "PHP_ADD_INCLUDE( [\$ext_srcdir] )\n    PHP_ADD_INCLUDE([\$abs_srcdir/ext])"
         );
+
         // swoole 5.1.3 build fix
         // get swoole version first
         $file = SOURCE_PATH . '/php-src/ext/swoole/include/swoole_version.h';
@@ -244,21 +272,33 @@ class SourcePatcher
         if ($version === '5.1.3') {
             self::patchFile('spc_fix_swoole_50513.patch', SOURCE_PATH . '/php-src/ext/swoole');
         }
+        if (version_compare($version, '6.0.0', '>=') && version_compare($version, '6.1.0', '<')) {
+            // remove when https://github.com/swoole/swoole-src/pull/5848 is merged
+            self::patchFile('swoole_fix_date_time.patch', SOURCE_PATH . '/php-src/ext/swoole');
+            // remove when https://github.com/swoole/swoole-src/pull/5847 is merged
+            self::patchFile('swoole_fix_odbclibs.patch', SOURCE_PATH . '/php-src/ext/swoole');
+        }
         return true;
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchBeforeMake(BuilderBase $builder): void
     {
-        // Try to fix debian environment build lack HAVE_STRLCAT problem
-        if ($builder instanceof LinuxBuilder) {
-            FileSystem::replaceFileRegex(SOURCE_PATH . '/php-src/main/php_config.h', '/^#define HAVE_STRLCPY 1$/m', '');
-            FileSystem::replaceFileRegex(SOURCE_PATH . '/php-src/main/php_config.h', '/^#define HAVE_STRLCAT 1$/m', '');
-        }
         if ($builder instanceof UnixBuilderBase) {
             FileSystem::replaceFileStr(SOURCE_PATH . '/php-src/Makefile', 'install-micro', '');
+        }
+        if (!SPCTarget::isStatic() && SPCTarget::getLibc() === 'musl') {
+            // we need to patch the symbol to global visibility, otherwise extensions with `initial-exec` TLS model will fail to load
+            FileSystem::replaceFileStr(
+                SOURCE_PATH . '/php-src/TSRM/TSRM.h',
+                '#define TSRMLS_MAIN_CACHE_DEFINE() TSRM_TLS void *TSRMLS_CACHE TSRM_TLS_MODEL_ATTR = NULL;',
+                '#define TSRMLS_MAIN_CACHE_DEFINE() TSRM_TLS __attribute__((visibility("default"))) void *TSRMLS_CACHE TSRM_TLS_MODEL_ATTR = NULL;',
+            );
+        } else {
+            FileSystem::replaceFileStr(
+                SOURCE_PATH . '/php-src/TSRM/TSRM.h',
+                '#define TSRMLS_MAIN_CACHE_DEFINE() TSRM_TLS __attribute__((visibility("default"))) void *TSRMLS_CACHE TSRM_TLS_MODEL_ATTR = NULL;',
+                '#define TSRMLS_MAIN_CACHE_DEFINE() TSRM_TLS void *TSRMLS_CACHE TSRM_TLS_MODEL_ATTR = NULL;',
+            );
         }
 
         // no asan
@@ -267,21 +307,32 @@ class SourcePatcher
         // }
 
         // call extension patch before make
-        foreach ($builder->getExts(false) as $ext) {
+        foreach ($builder->getExts() as $ext) {
             if ($ext->patchBeforeMake() === true) {
-                logger()->info('Extension [' . $ext->getName() . '] patched before make');
+                logger()->info("Extension [{$ext->getName()}] patched before make");
             }
         }
         foreach ($builder->getLibs() as $lib) {
             if ($lib->patchBeforeMake() === true) {
-                logger()->info('Library [' . $lib->getName() . '] patched before make');
+                logger()->info("Library [{$lib->getName()}] patched before make");
             }
+        }
+
+        if (str_contains((string) getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS'), '-release')) {
+            FileSystem::replaceFileLineContainsString(
+                SOURCE_PATH . '/php-src/ext/standard/info.c',
+                '#ifdef CONFIGURE_COMMAND',
+                '#ifdef NO_CONFIGURE_COMMAND',
+            );
+        } else {
+            FileSystem::replaceFileLineContainsString(
+                SOURCE_PATH . '/php-src/ext/standard/info.c',
+                '#ifdef NO_CONFIGURE_COMMAND',
+                '#ifdef CONFIGURE_COMMAND',
+            );
         }
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchHardcodedINI(array $ini = []): bool
     {
         $cli_c = SOURCE_PATH . '/php-src/sapi/cli/php_cli.c';
@@ -339,9 +390,6 @@ class SourcePatcher
         return $result;
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchMicroPhar(int $version_id): void
     {
         FileSystem::backupFile(SOURCE_PATH . '/php-src/ext/phar/phar.c');
@@ -367,9 +415,6 @@ class SourcePatcher
         }
     }
 
-    /**
-     * @throws RuntimeException
-     */
     public static function unpatchMicroPhar(): void
     {
         FileSystem::restoreBackupFile(SOURCE_PATH . '/php-src/ext/phar/phar.c');
@@ -377,14 +422,29 @@ class SourcePatcher
 
     /**
      * Fix the compilation issue of sqlsrv and pdo_sqlsrv on Windows (/sdl check is too strict and will cause Zend compilation to fail)
-     *
-     * @throws FileSystemException
      */
     public static function patchSQLSRVWin32(string $source_name): bool
     {
         $source_name = preg_replace('/[^a-z_]/', '', $source_name);
         if (file_exists(SOURCE_PATH . '/php-src/ext/' . $source_name . '/config.w32')) {
             FileSystem::replaceFileStr(SOURCE_PATH . '/php-src/ext/' . $source_name . '/config.w32', '/sdl', '');
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Fix the compilation issue of pdo_sqlsrv with php 8.5
+     */
+    public static function patchSQLSRVPhp85(): bool
+    {
+        $source_dir = SOURCE_PATH . '/php-src/ext/pdo_sqlsrv';
+        if (!file_exists($source_dir . '/config.m4') && is_dir($source_dir . '/source/pdo_sqlsrv')) {
+            FileSystem::moveFileOrDir($source_dir . '/LICENSE', $source_dir . '/source/pdo_sqlsrv/LICENSE');
+            FileSystem::moveFileOrDir($source_dir . '/source/shared', $source_dir . '/source/pdo_sqlsrv/shared');
+            FileSystem::moveFileOrDir($source_dir . '/source/pdo_sqlsrv', SOURCE_PATH . '/pdo_sqlsrv');
+            FileSystem::removeDir($source_dir);
+            FileSystem::moveFileOrDir(SOURCE_PATH . '/pdo_sqlsrv', $source_dir);
             return true;
         }
         return false;
@@ -436,16 +496,38 @@ class SourcePatcher
         }
         $extnum = intval($match[1]);
         if ($extnum < 30800) {
-            SourcePatcher::patchFile('imagick_php84_before_30800.patch', SOURCE_PATH . '/php-src/ext/imagick');
+            self::patchFile('imagick_php84_before_30800.patch', SOURCE_PATH . '/php-src/ext/imagick');
             return true;
         }
         return false;
     }
 
+    public static function patchFfiCentos7FixO3strncmp(): bool
+    {
+        if (!($ver = SPCTarget::getLibcVersion()) || version_compare($ver, '2.17', '>')) {
+            return false;
+        }
+        if (!file_exists(SOURCE_PATH . '/php-src/main/php_version.h')) {
+            return false;
+        }
+        $file = file_get_contents(SOURCE_PATH . '/php-src/main/php_version.h');
+        if (preg_match('/PHP_VERSION_ID (\d+)/', $file, $match) !== 0 && intval($match[1]) < 80316) {
+            return false;
+        }
+        self::patchFile('ffi_centos7_fix_O3_strncmp.patch', SOURCE_PATH . '/php-src');
+        return true;
+    }
+
+    public static function patchPkgConfigForGcc15(): bool
+    {
+        self::patchFile('pkg-config_gcc15.patch', SOURCE_PATH . '/pkg-config');
+        return true;
+    }
+
     public static function patchLibaomForAlpine(): bool
     {
         if (PHP_OS_FAMILY === 'Linux' && SystemUtil::isMuslDist()) {
-            SourcePatcher::patchFile('libaom_posix_implict.patch', SOURCE_PATH . '/libaom');
+            self::patchFile('libaom_posix_implict.patch', SOURCE_PATH . '/libaom');
             return true;
         }
         return false;
@@ -454,7 +536,7 @@ class SourcePatcher
     public static function patchAttrForAlpine(): bool
     {
         if (PHP_OS_FAMILY === 'Linux' && SystemUtil::isMuslDist() || PHP_OS_FAMILY === 'Darwin') {
-            SourcePatcher::patchFile('attr_alpine_gethostname.patch', SOURCE_PATH . '/attr');
+            self::patchFile('attr_alpine_gethostname.patch', SOURCE_PATH . '/attr');
             return true;
         }
         return false;
@@ -462,9 +544,6 @@ class SourcePatcher
 
     /**
      * Patch cli SAPI Makefile for Windows.
-     *
-     * @throws FileSystemException
-     * @throws RuntimeException
      */
     public static function patchWindowsCLITarget(): void
     {
@@ -481,7 +560,7 @@ class SourcePatcher
             ++$line_num;
         }
         if ($found === false) {
-            throw new RuntimeException('Cannot patch windows CLI Makefile!');
+            throw new PatchException('Windows Makefile patching for php.exe target', 'Cannot patch windows CLI Makefile, Makefile does not contain "$(BUILD_DIR)\php.exe:" line');
         }
         $lines[$line_num] = '$(BUILD_DIR)\php.exe: generated_files $(DEPS_CLI) $(PHP_GLOBAL_OBJS) $(CLI_GLOBAL_OBJS) $(STATIC_EXT_OBJS) $(ASM_OBJS) $(BUILD_DIR)\php.exe.res $(BUILD_DIR)\php.exe.manifest';
         $lines[$line_num + 1] = "\t" . '"$(LINK)" /nologo $(PHP_GLOBAL_OBJS_RESP) $(CLI_GLOBAL_OBJS_RESP) $(STATIC_EXT_OBJS_RESP) $(STATIC_EXT_LIBS) $(ASM_OBJS) $(LIBS) $(LIBS_CLI) $(BUILD_DIR)\php.exe.res /out:$(BUILD_DIR)\php.exe $(LDFLAGS) $(LDFLAGS_CLI) /ltcg /nodefaultlib:msvcrt /nodefaultlib:msvcrtd /ignore:4286';
@@ -489,8 +568,38 @@ class SourcePatcher
     }
 
     /**
-     * @throws RuntimeException
+     * Patch cgi SAPI Makefile for Windows.
      */
+    public static function patchWindowsCGITarget(): void
+    {
+        // search Makefile code line contains "$(BUILD_DIR)\php-cgi.exe:"
+        $content = FileSystem::readFile(SOURCE_PATH . '/php-src/Makefile');
+        $lines = explode("\r\n", $content);
+        $line_num = 0;
+        $found = false;
+        foreach ($lines as $v) {
+            if (str_contains($v, '$(BUILD_DIR)\php-cgi.exe:')) {
+                $found = $line_num;
+                break;
+            }
+            ++$line_num;
+        }
+        if ($found === false) {
+            throw new PatchException('Windows Makefile patching for php-cgi.exe target', 'Cannot patch windows CGI Makefile, Makefile does not contain "$(BUILD_DIR)\php-cgi.exe:" line');
+        }
+        // cli:                 $(BUILD_DIR)\php.exe:                 $(DEPS_CLI) $(CLI_GLOBAL_OBJS)                                                   $(BUILD_DIR)\$(PHPLIB) $(BUILD_DIR)\php.exe.res $(BUILD_DIR)\php.exe.manifest
+        // $lines[$line_num] = '$(BUILD_DIR)\php.exe: generated_files $(DEPS_CLI) $(CLI_GLOBAL_OBJS) $(PHP_GLOBAL_OBJS) $(STATIC_EXT_OBJS) $(ASM_OBJS)                        $(BUILD_DIR)\php.exe.res $(BUILD_DIR)\php.exe.manifest';
+        // cgi:              $(BUILD_DIR)\php-cgi.exe:                 $(DEPS_CGI) $(CGI_GLOBAL_OBJS)                                                   $(BUILD_DIR)\$(PHPLIB) $(BUILD_DIR)\php-cgi.exe.res $(BUILD_DIR)\php-cgi.exe.manifest
+        $lines[$line_num] = '$(BUILD_DIR)\php-cgi.exe: $(DEPS_CGI) $(CGI_GLOBAL_OBJS) $(PHP_GLOBAL_OBJS) $(STATIC_EXT_OBJS) $(ASM_OBJS) $(BUILD_DIR)\php-cgi.exe.res $(BUILD_DIR)\php-cgi.exe.manifest';
+
+        // cli:                        @"$(LINK)" /nologo $(CGI_GLOBAL_OBJS_RESP) $(BUILD_DIR)\$(PHPLIB)                                                                 $(LIBS_CGI) $(BUILD_DIR)\php-cgi.exe.res /out:$(BUILD_DIR)\php-cgi.exe $(LDFLAGS) $(LDFLAGS_CGI)
+        $lines[$line_num + 1] = "\t" . '@"$(LINK)" /nologo $(PHP_GLOBAL_OBJS_RESP) $(CGI_GLOBAL_OBJS_RESP) $(STATIC_EXT_OBJS_RESP) $(STATIC_EXT_LIBS) $(ASM_OBJS) $(LIBS) $(LIBS_CGI) $(BUILD_DIR)\php-cgi.exe.res /out:$(BUILD_DIR)\php-cgi.exe $(LDFLAGS) $(LDFLAGS_CGI) /ltcg /nodefaultlib:msvcrt /nodefaultlib:msvcrtd /ignore:4286';
+        FileSystem::writeFile(SOURCE_PATH . '/php-src/Makefile', implode("\r\n", $lines));
+
+        // Patch cgi-static, comment ZEND_TSRMLS_CACHE_DEFINE()
+        FileSystem::replaceFileRegex(SOURCE_PATH . '\php-src\sapi\cgi\cgi_main.c', '/^ZEND_TSRMLS_CACHE_DEFINE\(\)/m', '// ZEND_TSRMLS_CACHE_DEFINE()');
+    }
+
     public static function patchPhpLibxml212(): bool
     {
         $file = file_get_contents(SOURCE_PATH . '/php-src/main/php_version.h');
@@ -515,9 +624,6 @@ class SourcePatcher
         return false;
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchGDWin32(): bool
     {
         $file = file_get_contents(SOURCE_PATH . '/php-src/main/php_version.h');
@@ -537,12 +643,10 @@ class SourcePatcher
 
     /**
      * Add additional `static-php-cli.version` ini value for PHP source.
-     *
-     * @throws FileSystemException
      */
     public static function patchSPCVersionToPHP(string $version = 'unknown'): void
     {
-        // detect patch
+        // detect patch (remove this when 8.3 deprecated)
         $file = FileSystem::readFile(SOURCE_PATH . '/php-src/main/main.c');
         if (!str_contains($file, 'static-php-cli.version')) {
             logger()->debug('Inserting static-php-cli.version to php-src');
@@ -551,9 +655,6 @@ class SourcePatcher
         }
     }
 
-    /**
-     * @throws FileSystemException
-     */
     public static function patchMicroWin32(): void
     {
         // patch micro win32

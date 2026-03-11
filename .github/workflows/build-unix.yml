@@ -46,6 +46,10 @@ on:
         description: Prefer pre-built binaries (reduce build time)
         type: boolean
         default: true
+      with-suggested-libs:
+        description: Build with suggested libs
+        type: boolean
+        default: false
       debug:
         description: Show full build logs
         type: boolean
@@ -86,6 +90,10 @@ on:
         description: Prefer pre-built binaries (reduce build time)
         type: boolean
         default: true
+      with-suggested-libs:
+        description: Include suggested libs
+        type: boolean
+        default: false
       debug:
         description: Show full build logs
         type: boolean
@@ -136,12 +144,12 @@ jobs:
             macos-x86_64)
               DOWN_CMD="composer update --no-dev --classmap-authoritative && ./bin/spc doctor --auto-fix && ./bin/spc download"
               BUILD_CMD="./bin/spc build"
-              RUNS_ON="macos-13"
+              RUNS_ON="macos-15-intel"
               ;;
             macos-aarch64)
               DOWN_CMD="composer update --no-dev --classmap-authoritative && ./bin/spc doctor --auto-fix && ./bin/spc download"
               BUILD_CMD="./bin/spc build"
-              RUNS_ON="macos-14"
+              RUNS_ON="macos-15"
               ;;
           esac
           DOWN_CMD="$DOWN_CMD --with-php=${{ inputs.php-version }} --for-extensions=${{ inputs.extensions }} --ignore-cache-sources=php-src"
@@ -156,6 +164,9 @@ jobs:
           fi
           if [ ${{ inputs.prefer-pre-built }} == true ]; then
               DOWN_CMD="$DOWN_CMD --prefer-pre-built"
+          fi
+          if [ ${{ inputs.with-suggested-libs }} == true ]; then
+              BUILD_CMD="$BUILD_CMD --with-suggested-libs"
           fi
           if [ ${{ inputs.build-cli }} == true ]; then
               BUILD_CMD="$BUILD_CMD --build-cli --with-upx-pack"
@@ -198,9 +209,17 @@ jobs:
         run: ${{ needs.define-build.outputs.download }}
       - name: "Build PHP"
         run: ${{ needs.define-build.outputs.build }}
-      #- name: Setup tmate session
-      #  if: ${{ failure() }}
-      #  uses: mxschmitt/action-tmate@v3
+#      - name: Setup tmate session
+#        if: ${{ failure() }}
+#        uses: mxschmitt/action-tmate@v3
+
+      # Upload debug logs
+      - if: ${{ inputs.debug && failure() }}
+        name: "Upload build logs on failure"
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc-logs-${{ inputs.php-version }}-${{ inputs.os }}
+          path: log/*.log
 
       # Upload cli executable
       - if: ${{ inputs.build-cli == true }}
@@ -230,12 +249,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         name: "Upload License Files"
         with:
-          name: license-files
+          name: license-files-${{ inputs.php-version }}-${{ inputs.os }}
           path: buildroot/license/
       - uses: actions/upload-artifact@v4
         name: "Upload Build Metadata"
         with:
-          name: build-meta
+          name: build-meta-${{ inputs.php-version }}-${{ inputs.os }}
           path: |
             buildroot/build-extensions.json
             buildroot/build-libraries.json

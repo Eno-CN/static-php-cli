@@ -5,11 +5,12 @@ declare(strict_types=1);
 namespace SPC\builder\linux;
 
 use SPC\builder\traits\UnixSystemUtilTrait;
-use SPC\exception\RuntimeException;
 
 class SystemUtil
 {
     use UnixSystemUtilTrait;
+
+    public static ?string $libc_version = null;
 
     /** @noinspection PhpMissingBreakStatementInspection */
     public static function getOSRelease(): array
@@ -71,37 +72,6 @@ class SystemUtil
         }
 
         return $ncpu;
-    }
-
-    /**
-     * @throws RuntimeException
-     */
-    public static function getCCType(string $cc): string
-    {
-        return match (true) {
-            str_ends_with($cc, 'c++'), str_ends_with($cc, 'cc'), str_ends_with($cc, 'g++'), str_ends_with($cc, 'gcc') => 'gcc',
-            $cc === 'clang++', $cc === 'clang', str_starts_with($cc, 'musl-clang') => 'clang',
-            default => throw new RuntimeException("unknown cc type: {$cc}"),
-        };
-    }
-
-    /**
-     * @throws RuntimeException
-     * @noinspection PhpUnused
-     */
-    public static function getCrossCompilePrefix(string $cc, string $arch): string
-    {
-        return match (static::getCCType($cc)) {
-            // guessing clang toolchains
-            'clang' => match ($arch) {
-                'x86_64' => 'x86_64-linux-gnu-',
-                'arm64', 'aarch64' => 'aarch64-linux-gnu-',
-                default => throw new RuntimeException('unsupported arch: ' . $arch),
-            },
-            // remove gcc postfix
-            'gcc' => str_replace('-cc', '', str_replace('-gcc', '', $cc)) . '-',
-            default => throw new RuntimeException('unsupported cc'),
-        };
     }
 
     public static function findStaticLib(string $name): ?array
@@ -186,9 +156,12 @@ class SystemUtil
     /**
      * Get libc version string from ldd
      */
-    public static function getLibcVersionIfExists(): ?string
+    public static function getLibcVersionIfExists(?string $libc = null): ?string
     {
-        if (PHP_OS_FAMILY === 'Linux' && getenv('SPC_LIBC') === 'glibc') {
+        if (self::$libc_version !== null) {
+            return self::$libc_version;
+        }
+        if ($libc === 'glibc') {
             $result = shell()->execWithResult('ldd --version', false);
             if ($result[0] !== 0) {
                 return null;
@@ -198,21 +171,26 @@ class SystemUtil
             // match ldd version: "ldd (some useless text) 2.17" match 2.17
             $pattern = '/ldd\s+\(.*?\)\s+(\d+\.\d+)/';
             if (preg_match($pattern, $first_line, $matches)) {
-                return $matches[1];
+                self::$libc_version = $matches[1];
+                return self::$libc_version;
             }
             return null;
         }
-        if (PHP_OS_FAMILY === 'Linux' && getenv('SPC_LIBC') === 'musl') {
+        if ($libc === 'musl') {
             if (self::isMuslDist()) {
                 $result = shell()->execWithResult('ldd 2>&1', false);
-            } else {
+            } elseif (is_file('/usr/local/musl/lib/libc.so')) {
                 $result = shell()->execWithResult('/usr/local/musl/lib/libc.so 2>&1', false);
+            } else {
+                $arch = php_uname('m');
+                $result = shell()->execWithResult("/lib/ld-musl-{$arch}.so.1 2>&1", false);
             }
             // Match Version * line
             // match ldd version: "Version 1.2.3" match 1.2.3
             $pattern = '/Version\s+(\d+\.\d+\.\d+)/';
             if (preg_match($pattern, $result[1][1] ?? '', $matches)) {
-                return $matches[1];
+                self::$libc_version = $matches[1];
+                return self::$libc_version;
             }
         }
         return null;

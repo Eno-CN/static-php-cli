@@ -4,32 +4,33 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
+use SPC\exception\WrongUsageException;
+use SPC\util\executor\UnixAutoconfExecutor;
 
 trait unixodbc
 {
-    /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     */
     protected function build(): void
     {
-        shell()->cd($this->source_dir)
-            ->exec(
-                './configure ' .
-                '--enable-static --disable-shared ' .
-                '--disable-debug ' .
-                '--disable-dependency-tracking ' .
-                '--with-libiconv-prefix=' . BUILD_ROOT_PATH . ' ' .
-                '--with-included-ltdl ' .
-                '--enable-gui=no ' .
-                '--prefix='
+        $sysconf_selector = match (PHP_OS_FAMILY) {
+            'Darwin' => match (GNU_ARCH) {
+                'x86_64' => '/usr/local/etc',
+                'aarch64' => '/opt/homebrew/etc',
+                default => throw new WrongUsageException('Unsupported architecture: ' . GNU_ARCH),
+            },
+            'Linux' => '/etc',
+            default => throw new WrongUsageException('Unsupported OS: ' . PHP_OS_FAMILY),
+        };
+        UnixAutoconfExecutor::create($this)
+            ->configure(
+                '--disable-debug',
+                '--disable-dependency-tracking',
+                "--with-libiconv-prefix={$this->getBuildRootPath()}",
+                '--with-included-ltdl',
+                "--sysconfdir={$sysconf_selector}",
+                '--enable-gui=no',
             )
-            ->exec('make clean')
-            ->exec("make -j{$this->builder->concurrency}")
-            ->exec('make install DESTDIR=' . BUILD_ROOT_PATH);
+            ->make();
         $this->patchPkgconfPrefix(['odbc.pc', 'odbccr.pc', 'odbcinst.pc']);
-        $this->cleanLaFiles();
+        $this->patchLaDependencyPrefix();
     }
 }

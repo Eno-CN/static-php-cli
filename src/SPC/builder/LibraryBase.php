@@ -4,16 +4,20 @@ declare(strict_types=1);
 
 namespace SPC\builder;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
+use SPC\exception\SPCException;
+use SPC\exception\SPCInternalException;
 use SPC\exception\WrongUsageException;
 use SPC\store\Config;
 use SPC\store\Downloader;
 use SPC\store\FileSystem;
+use SPC\store\LockFile;
 use SPC\store\SourceManager;
+use SPC\util\GlobalValueTrait;
 
 abstract class LibraryBase
 {
+    use GlobalValueTrait;
+
     /** @var string */
     public const NAME = 'unknown';
 
@@ -23,32 +27,25 @@ abstract class LibraryBase
 
     protected bool $patched = false;
 
-    /**
-     * @throws RuntimeException
-     */
     public function __construct(?string $source_dir = null)
     {
         if (static::NAME === 'unknown') {
-            throw new RuntimeException('no unknown!!!!!');
+            throw new SPCInternalException('Please set the NAME constant in ' . static::class);
         }
-        $this->source_dir = $source_dir ?? (SOURCE_PATH . '/' . static::NAME);
+        $this->source_dir = $source_dir ?? (SOURCE_PATH . DIRECTORY_SEPARATOR . Config::getLib(static::NAME, 'source'));
     }
 
     /**
      * Try to install or build this library.
-     * @param  bool                $force If true, force install or build
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
+     * @param bool $force If true, force install or build
      */
     public function setup(bool $force = false): int
     {
-        $lock = json_decode(FileSystem::readFile(DOWNLOAD_PATH . '/.lock.json'), true) ?? [];
         $source = Config::getLib(static::NAME, 'source');
         // if source is locked as pre-built, we just tryInstall it
         $pre_built_name = Downloader::getPreBuiltLockName($source);
-        if (isset($lock[$pre_built_name]) && ($lock[$pre_built_name]['lock_as'] ?? SPC_DOWNLOAD_SOURCE) === SPC_DOWNLOAD_PRE_BUILT) {
-            return $this->tryInstall($lock[$pre_built_name]['filename'], $force);
+        if (($lock = LockFile::get($pre_built_name)) && $lock['lock_as'] === SPC_DOWNLOAD_PRE_BUILT) {
+            return $this->tryInstall($lock, $force);
         }
         return $this->tryBuild($force);
     }
@@ -104,10 +101,6 @@ abstract class LibraryBase
 
     /**
      * Calculate dependencies for current library.
-     *
-     * @throws RuntimeException
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
     public function calcDependency(): void
     {
@@ -128,9 +121,6 @@ abstract class LibraryBase
 
     /**
      * Get config static libs.
-     *
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
     public function getStaticLibs(): array
     {
@@ -139,9 +129,6 @@ abstract class LibraryBase
 
     /**
      * Get config headers.
-     *
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
     public function getHeaders(): array
     {
@@ -150,50 +137,30 @@ abstract class LibraryBase
 
     /**
      * Get binary files.
-     *
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
     public function getBinaryFiles(): array
     {
         return Config::getLib(static::NAME, 'bin', []);
     }
 
-    /**
-     * @throws WrongUsageException
-     * @throws FileSystemException
-     */
-    public function tryInstall(string $install_file, bool $force_install = false): int
+    public function tryInstall(array $lock, bool $force_install = false): int
     {
+        $install_file = $lock['filename'];
         if ($force_install) {
             logger()->info('Installing required library [' . static::NAME . '] from pre-built binaries');
 
             // Extract files
             try {
-                FileSystem::extractPackage($install_file, DOWNLOAD_PATH . '/' . $install_file, BUILD_ROOT_PATH);
+                FileSystem::extractPackage($install_file, $lock['source_type'], DOWNLOAD_PATH . '/' . $install_file, BUILD_ROOT_PATH);
                 $this->install();
                 return LIB_STATUS_OK;
-            } catch (FileSystemException|RuntimeException $e) {
+            } catch (SPCException $e) {
                 logger()->error('Failed to extract pre-built library [' . static::NAME . ']: ' . $e->getMessage());
                 return LIB_STATUS_INSTALL_FAILED;
             }
         }
-        foreach ($this->getStaticLibs() as $name) {
-            if (!file_exists(BUILD_LIB_PATH . "/{$name}")) {
-                $this->tryInstall($install_file, true);
-                return LIB_STATUS_OK;
-            }
-        }
-        foreach ($this->getHeaders() as $name) {
-            if (!file_exists(BUILD_INCLUDE_PATH . "/{$name}")) {
-                $this->tryInstall($install_file, true);
-                return LIB_STATUS_OK;
-            }
-        }
-        // pkg-config is treated specially. If it is pkg-config, check if the pkg-config binary exists
-        if (static::NAME === 'pkg-config' && !file_exists(BUILD_ROOT_PATH . '/bin/pkg-config')) {
-            $this->tryInstall($install_file, true);
-            return LIB_STATUS_OK;
+        if (!$this->isLibraryInstalled()) {
+            return $this->tryInstall($lock, true);
         }
         return LIB_STATUS_ALREADY;
     }
@@ -204,10 +171,6 @@ abstract class LibraryBase
      * BUILD_STATUS_OK if build success
      * BUILD_STATUS_ALREADY if already built
      * BUILD_STATUS_FAILED if build failed
-     *
-     * @throws RuntimeException
-     * @throws FileSystemException
-     * @throws WrongUsageException
      */
     public function tryBuild(bool $force_build = false): int
     {
@@ -221,43 +184,23 @@ abstract class LibraryBase
 
             // extract first if not exists
             if (!is_dir($this->source_dir)) {
-                $this->getBuilder()->emitPatchPoint('before-library[ ' . static::NAME . ']-extract');
+                $this->getBuilder()->emitPatchPoint('before-library[' . static::NAME . ']-extract');
                 SourceManager::initSource(libs: [static::NAME], source_only: true);
-                $this->getBuilder()->emitPatchPoint('after-library[ ' . static::NAME . ']-extract');
+                $this->getBuilder()->emitPatchPoint('after-library[' . static::NAME . ']-extract');
             }
 
             if (!$this->patched && $this->patchBeforeBuild()) {
                 file_put_contents($this->source_dir . '/.spc.patched', 'PATCHED!!!');
             }
-            $this->getBuilder()->emitPatchPoint('before-library[ ' . static::NAME . ']-build');
+            $this->getBuilder()->emitPatchPoint('before-library[' . static::NAME . ']-build');
             $this->build();
             $this->installLicense();
-            $this->getBuilder()->emitPatchPoint('after-library[ ' . static::NAME . ']-build');
+            $this->getBuilder()->emitPatchPoint('after-library[' . static::NAME . ']-build');
             return LIB_STATUS_OK;
         }
 
-        // check if these libraries exist, if not, invoke compilation and return the result status
-        foreach ($this->getStaticLibs() as $name) {
-            if (!file_exists(BUILD_LIB_PATH . "/{$name}")) {
-                $this->tryBuild(true);
-                return LIB_STATUS_OK;
-            }
-        }
-        // header files the same
-        foreach ($this->getHeaders() as $name) {
-            if (!file_exists(BUILD_INCLUDE_PATH . "/{$name}")) {
-                $this->tryBuild(true);
-                return LIB_STATUS_OK;
-            }
-        }
-        // current library is package and binary file is not exists
-        if (Config::getLib(static::NAME, 'type', 'lib') === 'package') {
-            foreach ($this->getBinaryFiles() as $name) {
-                if (!file_exists(BUILD_BIN_PATH . "/{$name}")) {
-                    $this->tryBuild(true);
-                    return LIB_STATUS_OK;
-                }
-            }
+        if (!$this->isLibraryInstalled()) {
+            return $this->tryBuild(true);
         }
         // if all the files exist at this point, skip the compilation process
         return LIB_STATUS_ALREADY;
@@ -319,6 +262,16 @@ abstract class LibraryBase
     }
 
     /**
+     * Patch code before windows configure.bat
+     * If you need to patch some code, overwrite this
+     * return true if you patched something, false if not
+     */
+    public function patchBeforeWindowsConfigure(): bool
+    {
+        return false;
+    }
+
+    /**
      * Patch code before make
      * If you need to patch some code, overwrite this
      * return true if you patched something, false if not
@@ -329,21 +282,46 @@ abstract class LibraryBase
     }
 
     /**
+     * Patch php-config after embed was built
+     * Example: imap requires -lcrypt
+     */
+    public function patchPhpConfig(): bool
+    {
+        return false;
+    }
+
+    /**
      * Build this library.
-     *
-     * @throws RuntimeException
      */
     abstract protected function build();
 
     protected function install(): void
     {
-        // do something after extracting pre-built files, default do nothing. overwrite this method to do something
+        // replace placeholders if BUILD_ROOT_PATH/.spc-extract-placeholder.json exists
+        $replace_item_file = BUILD_ROOT_PATH . '/.spc-extract-placeholder.json';
+        if (!file_exists($replace_item_file)) {
+            return;
+        }
+        $replace_items = json_decode(file_get_contents($replace_item_file), true);
+        if (!is_array($replace_items)) {
+            throw new SPCInternalException("Invalid placeholder file: {$replace_item_file}");
+        }
+        $placeholders = get_pack_replace();
+        // replace placeholders in BUILD_ROOT_PATH
+        foreach ($replace_items as $item) {
+            $filepath = BUILD_ROOT_PATH . "/{$item}";
+            FileSystem::replaceFileStr(
+                $filepath,
+                array_values($placeholders),
+                array_keys($placeholders),
+            );
+        }
+        // remove placeholder file
+        unlink($replace_item_file);
     }
 
     /**
      * Add lib dependency
-     *
-     * @throws RuntimeException
      */
     protected function addLibraryDependency(string $name, bool $optional = false): void
     {
@@ -353,7 +331,7 @@ abstract class LibraryBase
             return;
         }
         if (!$optional) {
-            throw new RuntimeException(static::NAME . " requires library {$name}");
+            throw new WrongUsageException(static::NAME . " requires library {$name} but it is not included");
         }
         logger()->debug('enabling ' . static::NAME . " without {$name}");
     }
@@ -368,20 +346,75 @@ abstract class LibraryBase
      */
     protected function installLicense(): void
     {
-        FileSystem::createDir(BUILD_ROOT_PATH . '/source-licenses/' . $this->getName());
         $source = Config::getLib($this->getName(), 'source');
+        FileSystem::createDir(BUILD_ROOT_PATH . "/source-licenses/{$source}");
         $license_files = Config::getSource($source)['license'] ?? [];
         if (is_assoc_array($license_files)) {
             $license_files = [$license_files];
         }
         foreach ($license_files as $index => $license) {
             if ($license['type'] === 'text') {
-                FileSystem::writeFile(BUILD_ROOT_PATH . '/source-licenses/' . $this->getName() . "/{$index}.txt", $license['text']);
+                FileSystem::writeFile(BUILD_ROOT_PATH . "/source-licenses/{$source}/{$index}.txt", $license['text']);
                 continue;
             }
             if ($license['type'] === 'file') {
-                copy($this->source_dir . '/' . $license['path'], BUILD_ROOT_PATH . '/source-licenses/' . $this->getName() . "/{$index}.txt");
+                copy($this->source_dir . '/' . $license['path'], BUILD_ROOT_PATH . "/source-licenses/{$source}/{$index}.txt");
             }
         }
+    }
+
+    protected function isLibraryInstalled(): bool
+    {
+        if ($pkg_configs = Config::getLib(static::NAME, 'pkg-configs', [])) {
+            $pkg_config_path = getenv('PKG_CONFIG_PATH') ?: '';
+            $search_paths = array_unique(array_filter(explode(is_unix() ? ':' : ';', $pkg_config_path)));
+
+            foreach ($pkg_configs as $name) {
+                $found = false;
+                foreach ($search_paths as $path) {
+                    if (file_exists($path . "/{$name}.pc")) {
+                        $found = true;
+                        break;
+                    }
+                }
+                if (!$found) {
+                    return false;
+                }
+            }
+            // allow using system dependencies if pkg_config_path is explicitly defined
+            if (count($search_paths) > 1) {
+                return true;
+            }
+        }
+        foreach (Config::getLib(static::NAME, 'static-libs', []) as $name) {
+            if (!file_exists(BUILD_LIB_PATH . "/{$name}")) {
+                return false;
+            }
+        }
+        foreach (Config::getLib(static::NAME, 'headers', []) as $name) {
+            if (!file_exists(BUILD_INCLUDE_PATH . "/{$name}")) {
+                return false;
+            }
+        }
+        $pkg_config_path = getenv('PKG_CONFIG_PATH') ?: '';
+        $search_paths = array_filter(explode(is_unix() ? ':' : ';', $pkg_config_path));
+        foreach (Config::getLib(static::NAME, 'pkg-configs', []) as $name) {
+            $found = false;
+            foreach ($search_paths as $path) {
+                if (file_exists($path . "/{$name}.pc")) {
+                    $found = true;
+                    break;
+                }
+            }
+            if (!$found) {
+                return false;
+            }
+        }
+        foreach (Config::getLib(static::NAME, 'bin', []) as $name) {
+            if (!file_exists(BUILD_BIN_PATH . "/{$name}")) {
+                return false;
+            }
+        }
+        return true;
     }
 }

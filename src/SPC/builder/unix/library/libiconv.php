@@ -4,27 +4,19 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
+use SPC\util\executor\UnixAutoconfExecutor;
+
 trait libiconv
 {
     protected function build(): void
     {
-        [,,$destdir] = SEPARATED_PATH;
-
-        shell()->cd($this->source_dir)
-            ->setEnv(['CFLAGS' => $this->getLibExtraCFlags(), 'LDFLAGS' => $this->getLibExtraLdFlags(), 'LIBS' => $this->getLibExtraLibs()])
-            ->execWithEnv(
-                './configure ' .
-                '--enable-static ' .
-                '--disable-shared ' .
-                '--enable-extra-encodings ' .
-                '--prefix='
+        UnixAutoconfExecutor::create($this)
+            ->configure(
+                '--enable-extra-encodings',
+                '--enable-year2038',
             )
-            ->execWithEnv('make clean')
-            ->execWithEnv("make -j{$this->builder->concurrency}")
-            ->execWithEnv('make install DESTDIR=' . $destdir);
-
-        if (file_exists(BUILD_BIN_PATH . '/iconv')) {
-            unlink(BUILD_BIN_PATH . '/iconv');
-        }
+            ->make('install-lib', with_install: false)
+            ->make('install-lib', with_install: false, dir: $this->getSourceDir() . '/libcharset');
+        $this->patchLaDependencyPrefix();
     }
 }

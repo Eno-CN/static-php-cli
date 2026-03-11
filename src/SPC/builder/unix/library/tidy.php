@@ -4,29 +4,22 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
-use SPC\store\FileSystem;
+use SPC\util\executor\UnixCMakeExecutor;
 
 trait tidy
 {
-    /**
-     * @throws RuntimeException
-     * @throws FileSystemException
-     */
     protected function build(): void
     {
-        FileSystem::resetDir($this->source_dir . '/build-dir');
-        shell()->cd($this->source_dir . '/build-dir')
-            ->exec(
-                'cmake ' .
-                "{$this->builder->makeCmakeArgs()} " .
-                '-DBUILD_SHARED_LIB=OFF ' .
-                '-DSUPPORT_CONSOLE_APP=OFF ' .
-                '..'
-            )
-            ->exec("cmake --build . -j {$this->builder->concurrency}")
-            ->exec('make install');
+        $cmake = UnixCMakeExecutor::create($this)
+            ->setBuildDir("{$this->source_dir}/build-dir")
+            ->addConfigureArgs(
+                '-DSUPPORT_CONSOLE_APP=OFF',
+                '-DBUILD_SHARED_LIB=OFF'
+            );
+        if (version_compare(get_cmake_version(), '4.0.0', '>=')) {
+            $cmake->addConfigureArgs('-DCMAKE_POLICY_VERSION_MINIMUM=3.5');
+        }
+        $cmake->build();
         $this->patchPkgconfPrefix(['tidy.pc']);
     }
 }

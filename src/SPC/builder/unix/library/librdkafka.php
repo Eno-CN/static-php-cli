@@ -4,36 +4,40 @@ declare(strict_types=1);
 
 namespace SPC\builder\unix\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
+use SPC\store\FileSystem;
+use SPC\util\executor\UnixCMakeExecutor;
 
 trait librdkafka
 {
-    /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     */
+    public function patchBeforeBuild(): bool
+    {
+        FileSystem::replaceFileStr(
+            $this->source_dir . '/lds-gen.py',
+            "funcs.append('rd_ut_coverage_check')",
+            ''
+        );
+        FileSystem::replaceFileStr(
+            $this->source_dir . '/src/rd.h',
+            '#error "IOV_MAX not defined"',
+            "#define IOV_MAX 1024\n#define __GNU__"
+        );
+        return true;
+    }
+
     protected function build(): void
     {
-        $builddir = BUILD_ROOT_PATH;
-
-        $zstd_option = $this->builder->getLib('zstd') ? ("STATIC_LIB_libzstd={$builddir}/lib/libzstd.a ") : '';
-        shell()->cd($this->source_dir)
-            ->exec(
-                $zstd_option .
-                './configure ' .
-                '--enable-static --disable-shared --disable-curl --disable-sasl --disable-valgrind --disable-zlib --disable-ssl ' .
-                ($zstd_option == '' ? '--disable-zstd ' : '') .
-                '--prefix='
+        UnixCMakeExecutor::create($this)
+            ->optionalLib('zstd', ...cmake_boolean_args('WITH_ZSTD'))
+            ->optionalLib('curl', ...cmake_boolean_args('WITH_CURL'))
+            ->optionalLib('openssl', ...cmake_boolean_args('WITH_SSL'))
+            ->optionalLib('zlib', ...cmake_boolean_args('WITH_ZLIB'))
+            ->optionalLib('liblz4', ...cmake_boolean_args('ENABLE_LZ4_EXT'))
+            ->addConfigureArgs(
+                '-DWITH_SASL=OFF',
+                '-DRDKAFKA_BUILD_STATIC=ON',
+                '-DRDKAFKA_BUILD_EXAMPLES=OFF',
+                '-DRDKAFKA_BUILD_TESTS=OFF',
             )
-            ->exec('make clean')
-            ->exec("make -j{$this->builder->concurrency}")
-            ->exec("make install DESTDIR={$builddir}");
-        $this->patchPkgconfPrefix(['rdkafka.pc', 'rdkafka-static.pc', 'rdkafka++.pc', 'rdkafka++-static.pc']);
-        // remove dynamic libs
-        shell()
-            ->exec("rm -rf {$builddir}/lib/*.so.*")
-            ->exec("rm -rf {$builddir}/lib/*.so")
-            ->exec("rm -rf {$builddir}/lib/*.dylib");
+            ->build();
     }
 }

@@ -5,45 +5,41 @@ declare(strict_types=1);
 namespace SPC\builder\unix\library;
 
 use SPC\builder\linux\library\LinuxLibraryBase;
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
-use SPC\exception\WrongUsageException;
+use SPC\builder\macos\library\MacOSLibraryBase;
+use SPC\util\executor\UnixAutoconfExecutor;
 
 trait libxslt
 {
-    /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     */
     protected function build(): void
     {
-        $required_libs = '';
-        foreach ($this->getDependencies() as $dep) {
-            if ($dep instanceof LinuxLibraryBase) {
-                $required_libs .= ' ' . $dep->getStaticLibFiles();
-            }
+        $static_libs = $this instanceof LinuxLibraryBase ? $this->getStaticLibFiles(include_self: false) : '';
+        $cpp = $this instanceof MacOSLibraryBase ? '-lc++' : '-lstdc++';
+        $ac = UnixAutoconfExecutor::create($this)
+            ->appendEnv([
+                'CFLAGS' => "-I{$this->getIncludeDir()}",
+                'LDFLAGS' => "-L{$this->getLibDir()}",
+                'LIBS' => "{$static_libs} {$cpp}",
+            ])
+            ->addConfigureArgs(
+                '--without-python',
+                '--without-crypto',
+                '--without-debug',
+                '--without-debugger',
+                "--with-libxml-prefix={$this->getBuildRootPath()}",
+            );
+        if (getenv('SPC_LD_LIBRARY_PATH') && getenv('SPC_LIBRARY_PATH')) {
+            $ac->appendEnv([
+                'LD_LIBRARY_PATH' => getenv('SPC_LD_LIBRARY_PATH'),
+                'LIBRARY_PATH' => getenv('SPC_LIBRARY_PATH'),
+            ]);
         }
-        shell()->cd($this->source_dir)
-            ->exec(
-                'CFLAGS="-I' . BUILD_INCLUDE_PATH . '" ' .
-                "{$this->builder->getOption('library_path')} " .
-                "{$this->builder->getOption('ld_library_path')} " .
-                'LDFLAGS="-L' . BUILD_LIB_PATH . '" ' .
-                "LIBS='{$required_libs} -lstdc++' " .
-                './configure ' .
-                '--enable-static --disable-shared ' .
-                '--without-python ' .
-                '--without-mem-debug ' .
-                '--without-crypto ' .
-                '--without-debug ' .
-                '--without-debugger ' .
-                '--with-libxml-prefix=' . escapeshellarg(BUILD_ROOT_PATH) . ' ' .
-                '--prefix='
-            )
-            ->exec('make clean')
-            ->exec("make -j{$this->builder->concurrency}")
-            ->exec('make install DESTDIR=' . escapeshellarg(BUILD_ROOT_PATH));
-        $this->patchPkgconfPrefix(['libexslt.pc']);
+        $ac->configure()->make();
+
+        $this->patchPkgconfPrefix(['libexslt.pc', 'libxslt.pc']);
+        $this->patchLaDependencyPrefix();
+        $AR = getenv('AR') ?: 'ar';
+        shell()->cd(BUILD_LIB_PATH)
+            ->exec("{$AR} -t libxslt.a | grep '\\.a$' | xargs -n1 {$AR} d libxslt.a")
+            ->exec("{$AR} -t libexslt.a | grep '\\.a$' | xargs -n1 {$AR} d libexslt.a");
     }
 }

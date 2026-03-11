@@ -1,20 +1,34 @@
 {
     "lib-base": {
-        "type": "root",
-        "lib-depends-unix": [
-            "pkg-config"
-        ]
+        "type": "root"
     },
     "php": {
         "type": "root",
         "source": "php-src",
         "lib-depends": [
             "lib-base",
-            "micro"
+            "micro",
+            "frankenphp"
+        ],
+        "lib-depends-macos": [
+            "lib-base",
+            "micro",
+            "libxml2",
+            "frankenphp"
         ],
         "lib-suggests-linux": [
-            "libacl"
+            "libacl",
+            "brotli",
+            "watcher"
+        ],
+        "lib-suggests-macos": [
+            "brotli",
+            "watcher"
         ]
+    },
+    "frankenphp": {
+        "source": "frankenphp",
+        "type": "target"
     },
     "micro": {
         "type": "target",
@@ -35,10 +49,10 @@
     },
     "brotli": {
         "source": "brotli",
-        "static-libs-unix": [
-            "libbrotlidec.a",
-            "libbrotlienc.a",
-            "libbrotlicommon.a"
+        "pkg-configs": [
+            "libbrotlicommon",
+            "libbrotlidec",
+            "libbrotlienc"
         ],
         "static-libs-windows": [
             "brotlicommon.lib",
@@ -86,8 +100,13 @@
             "libssh2",
             "brotli",
             "nghttp2",
+            "nghttp3",
+            "ngtcp2",
             "zstd",
-            "libcares"
+            "libcares",
+            "ldap",
+            "idn2",
+            "krb5"
         ],
         "lib-suggests-windows": [
             "brotli",
@@ -97,6 +116,15 @@
             "CoreFoundation",
             "CoreServices",
             "SystemConfiguration"
+        ]
+    },
+    "fastlz": {
+        "source": "fastlz",
+        "static-libs-unix": [
+            "libfastlz.a"
+        ],
+        "headers": [
+            "fastlz/fastlz.h"
         ]
     },
     "freetype": {
@@ -174,14 +202,15 @@
     },
     "grpc": {
         "source": "grpc",
-        "static-libs-unix": [
-            "libgrpc.a",
-            "libcares.a"
+        "pkg-configs": [
+            "grpc"
         ],
         "lib-depends": [
             "zlib",
-            "openssl"
+            "openssl",
+            "libcares"
         ],
+        "cpp-library": true,
         "frameworks": [
             "CoreFoundation"
         ]
@@ -189,24 +218,55 @@
     "icu": {
         "source": "icu",
         "cpp-library": true,
-        "static-libs-unix": [
-            "libicui18n.a",
-            "libicuio.a",
-            "libicuuc.a",
-            "libicudata.a"
+        "pkg-configs": [
+            "icu-uc",
+            "icu-i18n",
+            "icu-io"
+        ]
+    },
+    "icu-static-win": {
+        "source": "icu-static-win",
+        "static-libs-windows": [
+            "icudt.lib",
+            "icuin.lib",
+            "icuio.lib",
+            "icuuc.lib"
+        ],
+        "headers-windows": [
+            "unicode"
+        ]
+    },
+    "idn2": {
+        "source": "libidn2",
+        "pkg-configs": [
+            "libidn2"
+        ],
+        "headers": [
+            "idn2.h"
+        ],
+        "lib-suggests-unix": [
+            "libiconv",
+            "gettext",
+            "libunistring"
+        ],
+        "lib-depends-macos": [
+            "libiconv",
+            "gettext"
         ]
     },
     "imagemagick": {
         "source": "imagemagick",
-        "static-libs-unix": [
-            "libMagick++-7.Q16HDRI.a",
-            "libMagickWand-7.Q16HDRI.a",
-            "libMagickCore-7.Q16HDRI.a"
+        "cpp-library": true,
+        "pkg-configs": [
+            "Magick++-7.Q16HDRI",
+            "MagickCore-7.Q16HDRI",
+            "MagickWand-7.Q16HDRI"
         ],
         "lib-depends": [
             "zlib",
-            "libpng",
             "libjpeg",
+            "libjxl",
+            "libpng",
             "libwebp",
             "freetype",
             "libtiff",
@@ -229,11 +289,43 @@
             "openssl"
         ]
     },
+    "jbig": {
+        "source": "jbig",
+        "static-libs-unix": [
+            "libjbig.a",
+            "libjbig85.a"
+        ],
+        "headers": [
+            "jbig.h",
+            "jbig85.h",
+            "jbig_ar.h"
+        ]
+    },
+    "krb5": {
+        "source": "krb5",
+        "pkg-configs": [
+            "krb5-gssapi"
+        ],
+        "headers": [
+            "krb5.h",
+            "gssapi/gssapi.h"
+        ],
+        "lib-depends": [
+            "openssl"
+        ],
+        "lib-suggests": [
+            "ldap",
+            "libedit"
+        ],
+        "frameworks": [
+            "Kerberos"
+        ]
+    },
     "ldap": {
         "source": "ldap",
-        "static-libs-unix": [
-            "liblber.a",
-            "libldap.a"
+        "pkg-configs": [
+            "ldap",
+            "lber"
         ],
         "lib-depends": [
             "openssl",
@@ -241,6 +333,13 @@
             "gmp",
             "libsodium"
         ]
+    },
+    "lerc": {
+        "source": "lerc",
+        "static-libs-unix": [
+            "libLerc.a"
+        ],
+        "cpp-library": true
     },
     "libacl": {
         "source": "libacl",
@@ -262,6 +361,9 @@
         "source": "libargon2",
         "static-libs-unix": [
             "libargon2.a"
+        ],
+        "lib-suggests": [
+            "libsodium"
         ]
     },
     "libavif": {
@@ -271,6 +373,15 @@
         ],
         "static-libs-windows": [
             "avif.lib"
+        ],
+        "lib-depends": [
+            "libaom"
+        ],
+        "lib-suggests": [
+            "libwebp",
+            "libjpeg",
+            "libxml2",
+            "libpng"
         ]
     },
     "libcares": {
@@ -290,6 +401,15 @@
             "libde265.a"
         ],
         "cpp-library": true
+    },
+    "libedit": {
+        "source": "libedit",
+        "static-libs-unix": [
+            "libedit.a"
+        ],
+        "lib-depends": [
+            "ncurses"
+        ]
     },
     "libevent": {
         "source": "libevent",
@@ -377,17 +497,45 @@
             "zlib"
         ]
     },
+    "libjxl": {
+        "source": "libjxl",
+        "pkg-configs": [
+            "libjxl",
+            "libjxl_cms",
+            "libjxl_threads",
+            "libhwy"
+        ],
+        "lib-depends": [
+            "brotli",
+            "libjpeg",
+            "libpng",
+            "libwebp"
+        ]
+    },
     "liblz4": {
         "source": "liblz4",
         "static-libs-unix": [
             "liblz4.a"
         ]
     },
+    "libmaxminddb": {
+        "source": "libmaxminddb",
+        "static-libs-unix": [
+            "libmaxminddb.a"
+        ],
+        "headers": [
+            "maxminddb.h",
+            "maxminddb_config.h"
+        ]
+    },
     "libmemcached": {
         "source": "libmemcached",
+        "cpp-library": true,
         "static-libs-unix": [
             "libmemcached.a",
-            "libmemcachedutil.a"
+            "libmemcachedprotocol.a",
+            "libmemcachedutil.a",
+            "libhashkit.a"
         ]
     },
     "libpng": {
@@ -426,13 +574,16 @@
     },
     "librdkafka": {
         "source": "librdkafka",
-        "static-libs-unix": [
-            "librdkafka.a",
-            "librdkafka++.a",
-            "librdkafka-static.a"
+        "pkg-configs": [
+            "rdkafka++-static",
+            "rdkafka-static"
         ],
         "cpp-library": true,
         "lib-suggests": [
+            "curl",
+            "liblz4",
+            "openssl",
+            "zlib",
             "zstd"
         ]
     },
@@ -460,9 +611,6 @@
         ],
         "lib-depends": [
             "openssl"
-        ],
-        "lib-suggests": [
-            "zlib"
         ]
     },
     "libtiff": {
@@ -473,6 +621,38 @@
         "lib-depends": [
             "zlib",
             "libjpeg"
+        ],
+        "lib-suggests-unix": [
+            "lerc",
+            "libwebp",
+            "jbig",
+            "xz",
+            "zstd"
+        ]
+    },
+    "libunistring": {
+        "source": "libunistring",
+        "static-libs-unix": [
+            "libunistring.a"
+        ],
+        "headers": [
+            "unistr.h",
+            "unistring/"
+        ]
+    },
+    "liburing": {
+        "source": "liburing",
+        "pkg-configs": [
+            "liburing",
+            "liburing-ffi"
+        ],
+        "static-libs-linux": [
+            "liburing.a",
+            "liburing-ffi.a"
+        ],
+        "headers-linux": [
+            "liburing/",
+            "liburing.h"
         ]
     },
     "libuuid": {
@@ -492,12 +672,12 @@
     },
     "libwebp": {
         "source": "libwebp",
-        "static-libs-unix": [
-            "libwebp.a",
-            "libwebpdecoder.a",
-            "libwebpdemux.a",
-            "libwebpmux.a",
-            "libsharpyuv.a"
+        "pkg-configs": [
+            "libwebp",
+            "libwebpdecoder",
+            "libwebpdemux",
+            "libwebpmux",
+            "libsharpyuv"
         ],
         "static-libs-windows": [
             "libwebp.lib",
@@ -508,8 +688,8 @@
     },
     "libxml2": {
         "source": "libxml2",
-        "static-libs-unix": [
-            "libxml2.a"
+        "pkg-configs": [
+            "libxml-2.0"
         ],
         "static-libs-windows": [
             "libxml2s.lib",
@@ -523,7 +703,6 @@
         ],
         "lib-suggests-unix": [
             "xz",
-            "icu",
             "zlib"
         ],
         "lib-depends-windows": [
@@ -590,13 +769,24 @@
     "mimalloc": {
         "source": "mimalloc",
         "static-libs-unix": [
-            "mimalloc.o"
+            "libmimalloc.a"
         ]
     },
     "ncurses": {
         "source": "ncurses",
         "static-libs-unix": [
             "libncurses.a"
+        ]
+    },
+    "net-snmp": {
+        "source": "net-snmp",
+        "pkg-configs": [
+            "netsnmp",
+            "netsnmp-agent"
+        ],
+        "lib-depends": [
+            "openssl",
+            "zlib"
         ]
     },
     "nghttp2": {
@@ -615,7 +805,45 @@
             "openssl"
         ],
         "lib-suggests": [
-            "libxml2"
+            "libxml2",
+            "nghttp3",
+            "ngtcp2"
+        ]
+    },
+    "nghttp3": {
+        "source": "nghttp3",
+        "static-libs-unix": [
+            "libnghttp3.a"
+        ],
+        "static-libs-windows": [
+            "nghttp3.lib"
+        ],
+        "headers": [
+            "nghttp3"
+        ],
+        "lib-depends": [
+            "openssl"
+        ]
+    },
+    "ngtcp2": {
+        "source": "ngtcp2",
+        "static-libs-unix": [
+            "libngtcp2.a",
+            "libngtcp2_crypto_ossl.a"
+        ],
+        "static-libs-windows": [
+            "ngtcp2.lib",
+            "ngtcp2_crypto_ossl.lib"
+        ],
+        "headers": [
+            "ngtcp2"
+        ],
+        "lib-depends": [
+            "openssl"
+        ],
+        "lib-suggests": [
+            "nghttp3",
+            "brotli"
         ]
     },
     "onig": {
@@ -634,6 +862,9 @@
     },
     "openssl": {
         "source": "openssl",
+        "pkg-configs": [
+            "openssl"
+        ],
         "static-libs-unix": [
             "libssl.a",
             "libcrypto.a"
@@ -651,17 +882,15 @@
     },
     "postgresql": {
         "source": "postgresql",
-        "static-libs-unix": [
-            "libpq.a",
-            "libpgport.a",
-            "libpgcommon.a"
+        "pkg-configs": [
+            "libpq"
         ],
         "lib-depends": [
             "libiconv",
             "libxml2",
             "openssl",
             "zlib",
-            "readline"
+            "libedit"
         ],
         "lib-suggests": [
             "icu",
@@ -696,6 +925,12 @@
             "depot.h"
         ]
     },
+    "re2c": {
+        "source": "re2c",
+        "bin-unix": [
+            "re2c"
+        ]
+    },
     "readline": {
         "source": "readline",
         "static-libs-unix": [
@@ -707,6 +942,7 @@
     },
     "snappy": {
         "source": "snappy",
+        "cpp-library": true,
         "static-libs-unix": [
             "libsnappy.a"
         ],
@@ -741,6 +977,11 @@
     },
     "unixodbc": {
         "source": "unixodbc",
+        "pkg-configs": [
+            "odbc",
+            "odbccr",
+            "odbcinst"
+        ],
         "static-libs-unix": [
             "libodbc.a",
             "libodbccr.a",
@@ -748,6 +989,16 @@
         ],
         "lib-depends": [
             "libiconv"
+        ]
+    },
+    "watcher": {
+        "source": "watcher",
+        "cpp-library": true,
+        "static-libs-unix": [
+            "libwatcher-c.a"
+        ],
+        "headers": [
+            "wtr/watcher-c.h"
         ]
     },
     "xz": {
@@ -772,6 +1023,9 @@
     },
     "zlib": {
         "source": "zlib",
+        "pkg-configs": [
+            "zlib"
+        ],
         "static-libs-unix": [
             "libz.a"
         ],
@@ -785,6 +1039,9 @@
     },
     "zstd": {
         "source": "zstd",
+        "pkg-configs": [
+            "libzstd"
+        ],
         "static-libs-unix": [
             "libzstd.a"
         ],

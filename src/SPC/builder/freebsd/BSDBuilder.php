@@ -5,8 +5,6 @@ declare(strict_types=1);
 namespace SPC\builder\freebsd;
 
 use SPC\builder\unix\UnixBuilderBase;
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
 use SPC\exception\WrongUsageException;
 use SPC\store\FileSystem;
 use SPC\store\SourcePatcher;
@@ -16,11 +14,6 @@ class BSDBuilder extends UnixBuilderBase
     /** @var bool Micro patch phar flag */
     private bool $phar_patched = false;
 
-    /**
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     * @throws FileSystemException
-     */
     public function __construct(array $options = [])
     {
         $this->options = $options;
@@ -32,10 +25,6 @@ class BSDBuilder extends UnixBuilderBase
         f_putenv('CXX=' . $this->getOption('cxx', 'clang++'));
         // set PATH
         f_putenv('PATH=' . BUILD_ROOT_PATH . '/bin:' . getenv('PATH'));
-        // set PKG_CONFIG
-        f_putenv('PKG_CONFIG=' . BUILD_ROOT_PATH . '/bin/pkg-config');
-        // set PKG_CONFIG_PATH
-        f_putenv('PKG_CONFIG_PATH=' . BUILD_LIB_PATH . '/pkgconfig/');
 
         // set arch (default: current)
         $this->setOptionIfNotExist('arch', php_uname('m'));
@@ -47,8 +36,6 @@ class BSDBuilder extends UnixBuilderBase
         // cflags
         $this->arch_c_flags = SystemUtil::getArchCFlags($this->getOption('arch'));
         $this->arch_cxx_flags = SystemUtil::getArchCFlags($this->getOption('arch'));
-        // cmake toolchain
-        $this->cmake_toolchain_file = SystemUtil::makeCmakeToolchainFile('BSD', $this->getOption('arch'), $this->arch_c_flags);
 
         // create pkgconfig and include dir (some libs cannot create them automatically)
         f_mkdir(BUILD_LIB_PATH . '/pkgconfig', recursive: true);
@@ -58,25 +45,10 @@ class BSDBuilder extends UnixBuilderBase
     /**
      * Just start to build statically linked php binary
      *
-     * @param  int                 $build_target build target
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
+     * @param int $build_target build target
      */
     public function buildPHP(int $build_target = BUILD_TARGET_NONE): void
     {
-        // ---------- Update extra-libs ----------
-        $extra_libs = $this->getOption('extra-libs', '');
-        // add libc++, some extensions or libraries need it (C++ cannot be linked statically)
-        $extra_libs .= (empty($extra_libs) ? '' : ' ') . ($this->hasCpp() ? '-lc++ ' : '');
-        if (!$this->getOption('bloat', false)) {
-            $extra_libs .= (empty($extra_libs) ? '' : ' ') . implode(' ', $this->getAllStaticLibFiles());
-        } else {
-            logger()->info('bloat linking');
-            $extra_libs .= (empty($extra_libs) ? '' : ' ') . implode(' ', array_map(fn ($x) => "-Wl,-force_load,{$x}", array_filter($this->getAllStaticLibFiles())));
-        }
-        $this->setOption('extra-libs', $extra_libs);
-
         $this->emitPatchPoint('before-php-buildconf');
         SourcePatcher::patchBeforeBuildconf($this);
 
@@ -98,6 +70,7 @@ class BSDBuilder extends UnixBuilderBase
         $enableFpm = ($build_target & BUILD_TARGET_FPM) === BUILD_TARGET_FPM;
         $enableMicro = ($build_target & BUILD_TARGET_MICRO) === BUILD_TARGET_MICRO;
         $enableEmbed = ($build_target & BUILD_TARGET_EMBED) === BUILD_TARGET_EMBED;
+        $enableFrankenphp = ($build_target & BUILD_TARGET_FRANKENPHP) === BUILD_TARGET_FRANKENPHP;
 
         shell()->cd(SOURCE_PATH . '/php-src')
             ->exec(
@@ -145,7 +118,19 @@ class BSDBuilder extends UnixBuilderBase
             }
             $this->buildEmbed();
         }
+        $shared_extensions = array_map('trim', array_filter(explode(',', $this->getOption('build-shared'))));
+        if (!empty($shared_extensions)) {
+            logger()->info('Building shared extensions ...');
+            $this->buildSharedExts();
+        }
+        if ($enableFrankenphp) {
+            logger()->info('building frankenphp');
+            $this->buildFrankenphp();
+        }
+    }
 
+    public function testPHP(int $build_target = BUILD_TARGET_NONE)
+    {
         if (php_uname('m') === $this->getOption('arch')) {
             $this->emitPatchPoint('before-sanity-check');
             $this->sanityCheck($build_target);
@@ -154,9 +139,6 @@ class BSDBuilder extends UnixBuilderBase
 
     /**
      * Build cli sapi
-     *
-     * @throws RuntimeException
-     * @throws FileSystemException
      */
     protected function buildCli(): void
     {
@@ -171,15 +153,11 @@ class BSDBuilder extends UnixBuilderBase
         if (!$this->getOption('no-strip', false)) {
             $shell->exec('strip sapi/cli/php');
         }
-        $this->deployBinary(BUILD_TARGET_CLI);
+        $this->deploySAPIBinary(BUILD_TARGET_CLI);
     }
 
     /**
      * Build phpmicro sapi
-     *
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
      */
     protected function buildMicro(): void
     {
@@ -204,9 +182,9 @@ class BSDBuilder extends UnixBuilderBase
             ->exec("make -j{$this->concurrency} {$vars} micro");
 
         if (!$this->getOption('no-strip', false)) {
-            shell()->cd(SOURCE_PATH . '/php-src/sapi/micro')->exec('strip --strip-all micro.sfx');
+            shell()->cd(SOURCE_PATH . '/php-src/sapi/micro')->exec('strip --strip-unneeded micro.sfx');
         }
-        $this->deployBinary(BUILD_TARGET_MICRO);
+        $this->deploySAPIBinary(BUILD_TARGET_MICRO);
 
         if ($this->phar_patched) {
             SourcePatcher::unpatchMicroPhar();
@@ -215,9 +193,6 @@ class BSDBuilder extends UnixBuilderBase
 
     /**
      * Build fpm sapi
-     *
-     * @throws RuntimeException
-     * @throws FileSystemException
      */
     protected function buildFpm(): void
     {
@@ -231,13 +206,11 @@ class BSDBuilder extends UnixBuilderBase
         if (!$this->getOption('no-strip', false)) {
             $shell->exec('strip sapi/fpm/php-fpm');
         }
-        $this->deployBinary(BUILD_TARGET_FPM);
+        $this->deploySAPIBinary(BUILD_TARGET_FPM);
     }
 
     /**
      * Build embed sapi
-     *
-     * @throws RuntimeException
      */
     protected function buildEmbed(): void
     {

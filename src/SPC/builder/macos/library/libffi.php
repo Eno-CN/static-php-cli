@@ -4,33 +4,21 @@ declare(strict_types=1);
 
 namespace SPC\builder\macos\library;
 
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
+use SPC\util\executor\UnixAutoconfExecutor;
 
 class libffi extends MacOSLibraryBase
 {
     public const NAME = 'libffi';
 
-    /**
-     * @throws RuntimeException
-     * @throws FileSystemException
-     */
     protected function build(): void
     {
-        [, , $destdir] = SEPARATED_PATH;
         $arch = getenv('SPC_ARCH');
-        shell()->cd($this->source_dir)
-            ->exec(
-                './configure ' .
-                '--enable-static ' .
-                '--disable-shared ' .
-                "--host={$arch}-apple-darwin " .
-                "--target={$arch}-apple-darwin " .
-                '--prefix= ' // use prefix=/
+        UnixAutoconfExecutor::create($this)
+            ->configure(
+                "--host={$arch}-apple-darwin",
+                "--target={$arch}-apple-darwin",
             )
-            ->exec('make clean')
-            ->exec("make -j{$this->builder->concurrency}")
-            ->exec("make install DESTDIR={$destdir}");
+            ->make();
         $this->patchPkgconfPrefix(['libffi.pc']);
     }
 }

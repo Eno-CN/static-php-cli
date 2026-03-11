@@ -4,66 +4,35 @@ declare(strict_types=1);
 
 namespace SPC\builder\linux;
 
-use SPC\builder\linux\library\LinuxLibraryBase;
 use SPC\builder\unix\UnixBuilderBase;
-use SPC\exception\FileSystemException;
-use SPC\exception\RuntimeException;
+use SPC\exception\PatchException;
 use SPC\exception\WrongUsageException;
+use SPC\store\Config;
+use SPC\store\DirDiff;
 use SPC\store\FileSystem;
 use SPC\store\SourcePatcher;
 use SPC\util\GlobalEnvManager;
+use SPC\util\SPCConfigUtil;
+use SPC\util\SPCTarget;
 
 class LinuxBuilder extends UnixBuilderBase
 {
     /** @var bool Micro patch phar flag */
     private bool $phar_patched = false;
 
-    /**
-     * @throws FileSystemException
-     * @throws WrongUsageException
-     */
     public function __construct(array $options = [])
     {
         $this->options = $options;
 
-        // check musl-cross make installed if we use musl-cross-make
-        $arch = arch2gnu(php_uname('m'));
-
-        GlobalEnvManager::init($this);
-
-        if (getenv('SPC_LIBC') === 'musl' && !SystemUtil::isMuslDist()) {
-            $this->setOptionIfNotExist('library_path', "LIBRARY_PATH=\"/usr/local/musl/{$arch}-linux-musl/lib\"");
-            $this->setOptionIfNotExist('ld_library_path', "LD_LIBRARY_PATH=\"/usr/local/musl/{$arch}-linux-musl/lib\"");
-            GlobalEnvManager::putenv("PATH=/usr/local/musl/bin:/usr/local/musl/{$arch}-linux-musl/bin:" . getenv('PATH'));
-            $configure = getenv('SPC_CMD_PREFIX_PHP_CONFIGURE');
-            $configure = "LD_LIBRARY_PATH=\"/usr/local/musl/{$arch}-linux-musl/lib\" " . $configure;
-            GlobalEnvManager::putenv("SPC_CMD_PREFIX_PHP_CONFIGURE={$configure}");
-
-            if (!file_exists("/usr/local/musl/{$arch}-linux-musl/lib/libc.a")) {
-                throw new WrongUsageException('You are building with musl-libc target in glibc distro, but musl-toolchain is not installed, please install musl-toolchain first. (You can use `doctor` command to install it)');
-            }
-        }
+        GlobalEnvManager::init();
+        GlobalEnvManager::afterInit();
 
         // concurrency
-        $this->concurrency = intval(getenv('SPC_CONCURRENCY'));
+        $this->concurrency = (int) getenv('SPC_CONCURRENCY');
         // cflags
         $this->arch_c_flags = getenv('SPC_DEFAULT_C_FLAGS');
         $this->arch_cxx_flags = getenv('SPC_DEFAULT_CXX_FLAGS');
-        // cmake toolchain
-        $this->cmake_toolchain_file = SystemUtil::makeCmakeToolchainFile(
-            'Linux',
-            $arch,
-            $this->arch_c_flags,
-            getenv('CC'),
-            getenv('CXX'),
-        );
-
-        // cross-compiling is not supported yet
-        /*if (php_uname('m') !== $this->arch) {
-            $this->cross_compile_prefix = SystemUtil::getCrossCompilePrefix($this->cc, $this->arch);
-            logger()->info('using cross compile prefix: ' . $this->cross_compile_prefix);
-            $this->configure_env .= " CROSS_COMPILE='{$this->cross_compile_prefix}'";
-        }*/
+        $this->arch_ld_flags = getenv('SPC_DEFAULT_LD_FLAGS');
 
         // create pkgconfig and include dir (some libs cannot create them automatically)
         f_mkdir(BUILD_LIB_PATH . '/pkgconfig', recursive: true);
@@ -71,52 +40,12 @@ class LinuxBuilder extends UnixBuilderBase
     }
 
     /**
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
-     */
-    public function makeAutoconfArgs(string $name, array $libSpecs): string
-    {
-        $ret = '';
-        foreach ($libSpecs as $libName => $arr) {
-            $lib = $this->getLib($libName);
-
-            $arr = $arr ?? [];
-
-            $disableArgs = $arr[0] ?? null;
-            $prefix = $arr[1] ?? null;
-            if ($lib instanceof LinuxLibraryBase) {
-                logger()->info("{$name} \033[32;1mwith\033[0;1m {$libName} support");
-                $ret .= $lib->makeAutoconfEnv($prefix) . ' ';
-            } else {
-                logger()->info("{$name} \033[31;1mwithout\033[0;1m {$libName} support");
-                $ret .= ($disableArgs ?? "--with-{$libName}=no") . ' ';
-            }
-        }
-        return rtrim($ret);
-    }
-
-    /**
      * Build PHP from source.
      *
-     * @param  int                 $build_target Build target, use `BUILD_TARGET_*` constants
-     * @throws RuntimeException
-     * @throws FileSystemException
-     * @throws WrongUsageException
+     * @param int $build_target Build target, use `BUILD_TARGET_*` constants
      */
     public function buildPHP(int $build_target = BUILD_TARGET_NONE): void
     {
-        // ---------- Update extra-libs ----------
-        $extra_libs = getenv('SPC_EXTRA_LIBS') ?: '';
-        // bloat means force-load all static libraries, even if they are not used
-        if (!$this->getOption('bloat', false)) {
-            $extra_libs .= (empty($extra_libs) ? '' : ' ') . implode(' ', $this->getAllStaticLibFiles());
-        } else {
-            $extra_libs .= (empty($extra_libs) ? '' : ' ') . implode(' ', array_map(fn ($x) => "-Xcompiler {$x}", array_filter($this->getAllStaticLibFiles())));
-        }
-        // add libstdc++, some extensions or libraries need it
-        $extra_libs .= (empty($extra_libs) ? '' : ' ') . ($this->hasCpp() ? '-lstdc++ ' : '');
-        f_putenv('SPC_EXTRA_LIBS=' . $extra_libs);
         $cflags = $this->arch_c_flags;
         f_putenv('CFLAGS=' . $cflags);
 
@@ -131,6 +60,14 @@ class LinuxBuilder extends UnixBuilderBase
         $phpVersionID = $this->getPHPVersionID();
         $json_74 = $phpVersionID < 80000 ? '--enable-json ' : '';
 
+        $opcache_jit = !$this->getOption('disable-opcache-jit', false);
+        if ($opcache_jit && ($phpVersionID >= 80500 || $this->getExt('opcache'))) {
+            // php 8.5 contains opcache extension by default,
+            // if opcache_jit is enabled for 8.5 or opcache enabled,
+            // we need to disable undefined behavior sanitizer.
+            f_putenv('SPC_COMPILER_EXTRA=-fno-sanitize=undefined');
+        }
+
         if ($this->getOption('enable-zts', false)) {
             $maxExecutionTimers = $phpVersionID >= 80100 ? '--enable-zend-max-execution-timers ' : '';
             $zts = '--enable-zts --disable-zend-signals ';
@@ -138,254 +75,279 @@ class LinuxBuilder extends UnixBuilderBase
             $maxExecutionTimers = '';
             $zts = '';
         }
-        $disable_jit = $this->getOption('disable-opcache-jit', false) ? '--disable-opcache-jit ' : '';
 
         $config_file_path = $this->getOption('with-config-file-path', false) ?
             ('--with-config-file-path=' . $this->getOption('with-config-file-path') . ' ') : '';
         $config_file_scan_dir = $this->getOption('with-config-file-scan-dir', false) ?
             ('--with-config-file-scan-dir=' . $this->getOption('with-config-file-scan-dir') . ' ') : '';
 
-        $enable_cli = ($build_target & BUILD_TARGET_CLI) === BUILD_TARGET_CLI;
-        $enable_fpm = ($build_target & BUILD_TARGET_FPM) === BUILD_TARGET_FPM;
-        $enable_micro = ($build_target & BUILD_TARGET_MICRO) === BUILD_TARGET_MICRO;
-        $enable_embed = ($build_target & BUILD_TARGET_EMBED) === BUILD_TARGET_EMBED;
+        $enableCli = ($build_target & BUILD_TARGET_CLI) === BUILD_TARGET_CLI;
+        $enableFpm = ($build_target & BUILD_TARGET_FPM) === BUILD_TARGET_FPM;
+        $enableMicro = ($build_target & BUILD_TARGET_MICRO) === BUILD_TARGET_MICRO;
+        $enableEmbed = ($build_target & BUILD_TARGET_EMBED) === BUILD_TARGET_EMBED;
+        $enableFrankenphp = ($build_target & BUILD_TARGET_FRANKENPHP) === BUILD_TARGET_FRANKENPHP;
+        $enableCgi = ($build_target & BUILD_TARGET_CGI) === BUILD_TARGET_CGI;
 
-        $mimallocLibs = $this->getLib('mimalloc') !== null ? BUILD_LIB_PATH . '/mimalloc.o ' : '';
         // prepare build php envs
-        $envs_build_php = SystemUtil::makeEnvVarString([
-            'CFLAGS' => getenv('SPC_CMD_VAR_PHP_CONFIGURE_CFLAGS'),
-            'CPPFLAGS' => getenv('SPC_CMD_VAR_PHP_CONFIGURE_CPPFLAGS'),
-            'LDFLAGS' => getenv('SPC_CMD_VAR_PHP_CONFIGURE_LDFLAGS'),
-            'LIBS' => $mimallocLibs . getenv('SPC_CMD_VAR_PHP_CONFIGURE_LIBS'),
+        // $musl_flag = SPCTarget::getLibc() === 'musl' ? ' -D__MUSL__' : ' -U__MUSL__';
+        $php_configure_env = SystemUtil::makeEnvVarString([
+            'CFLAGS' => getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS'),
+            'CPPFLAGS' => '-I' . BUILD_INCLUDE_PATH, // . ' -Dsomethinghere', // . $musl_flag,
+            'LDFLAGS' => '-L' . BUILD_LIB_PATH,
+            // 'LIBS' => SPCTarget::getRuntimeLibs(), // do not pass static libraries here yet, they may contain polyfills for libc functions!
         ]);
 
-        // process micro upx patch if micro sapi enabled
-        if ($enable_micro) {
-            if (version_compare($this->getMicroVersion(), '0.2.0') < 0) {
-                // for phpmicro 0.1.x
-                $this->processMicroUPXLegacy();
-            }
-            // micro latest needs do strip and upx pack later (strip, upx, cut binary manually supported)
-        }
+        $phpvars = getenv('SPC_EXTRA_PHP_VARS') ?: '';
 
         $embed_type = getenv('SPC_CMD_VAR_PHP_EMBED_TYPE') ?: 'static';
-        shell()->cd(SOURCE_PATH . '/php-src')
-            ->exec(
-                getenv('SPC_CMD_PREFIX_PHP_CONFIGURE') . ' ' .
-                ($enable_cli ? '--enable-cli ' : '--disable-cli ') .
-                ($enable_fpm ? '--enable-fpm ' . ($this->getLib('libacl') !== null ? '--with-fpm-acl ' : '') : '--disable-fpm ') .
-                ($enable_embed ? "--enable-embed={$embed_type} " : '--disable-embed ') .
-                ($enable_micro ? '--enable-micro=all-static ' : '--disable-micro ') .
-                $config_file_path .
-                $config_file_scan_dir .
-                $disable_jit .
-                $json_74 .
-                $zts .
-                $maxExecutionTimers .
-                $this->makeStaticExtensionArgs() .
-                ' ' . $envs_build_php . ' '
+        if ($embed_type !== 'static' && SPCTarget::isStatic()) {
+            throw new WrongUsageException(
+                'Linux does not support loading shared libraries when linking libc statically. ' .
+                'Change SPC_CMD_VAR_PHP_EMBED_TYPE to static.'
             );
+        }
+
+        $this->seekPhpSrcLogFileOnException(fn () => shell()->cd(SOURCE_PATH . '/php-src')->exec(
+            $php_configure_env . ' ' .
+            getenv('SPC_CMD_PREFIX_PHP_CONFIGURE') . ' ' .
+            ($enableCli ? '--enable-cli ' : '--disable-cli ') .
+            ($enableFpm ? '--enable-fpm ' . ($this->getLib('libacl') !== null ? '--with-fpm-acl ' : '') : '--disable-fpm ') .
+            ($enableEmbed ? "--enable-embed={$embed_type} " : '--disable-embed ') .
+            ($enableMicro ? '--enable-micro=all-static ' : '--disable-micro ') .
+            ($enableCgi ? '--enable-cgi ' : '--disable-cgi ') .
+            $config_file_path .
+            $config_file_scan_dir .
+            $json_74 .
+            $zts .
+            $maxExecutionTimers .
+            $phpvars . ' ' .
+            $this->makeStaticExtensionArgs() . ' '
+        ));
 
         $this->emitPatchPoint('before-php-make');
         SourcePatcher::patchBeforeMake($this);
 
         $this->cleanMake();
 
-        if ($enable_cli) {
+        if ($enableCli) {
             logger()->info('building cli');
             $this->buildCli();
         }
-        if ($enable_fpm) {
+        if ($enableFpm) {
             logger()->info('building fpm');
             $this->buildFpm();
         }
-        if ($enable_micro) {
+        if ($enableCgi) {
+            logger()->info('building cgi');
+            $this->buildCgi();
+        }
+        if ($enableMicro) {
             logger()->info('building micro');
             $this->buildMicro();
         }
-        if ($enable_embed) {
+        if ($enableEmbed) {
             logger()->info('building embed');
-            if ($enable_micro) {
+            if ($enableMicro) {
                 FileSystem::replaceFileStr(SOURCE_PATH . '/php-src/Makefile', 'OVERALL_TARGET =', 'OVERALL_TARGET = libphp.la');
             }
             $this->buildEmbed();
         }
+        if ($enableFrankenphp) {
+            logger()->info('building frankenphp');
+            $this->buildFrankenphp();
+        }
+        $shared_extensions = array_map('trim', array_filter(explode(',', $this->getOption('build-shared'))));
+        if (!empty($shared_extensions)) {
+            if (SPCTarget::isStatic()) {
+                throw new WrongUsageException(
+                    "You're building against musl libc statically (the default on Linux), but you're trying to build shared extensions.\n" .
+                    'Static musl libc does not implement `dlopen`, so your php binary is not able to load shared extensions.' . "\n" .
+                    'Either use SPC_LIBC=glibc to link against glibc on a glibc OS, or use SPC_TARGET="native-native-musl -dynamic" to link against musl libc dynamically using `zig cc`.'
+                );
+            }
+            logger()->info('Building shared extensions...');
+            $this->buildSharedExts();
+        }
+    }
 
+    public function testPHP(int $build_target = BUILD_TARGET_NONE)
+    {
         $this->emitPatchPoint('before-sanity-check');
         $this->sanityCheck($build_target);
     }
 
     /**
      * Build cli sapi
-     *
-     * @throws RuntimeException
-     * @throws FileSystemException
      */
     protected function buildCli(): void
     {
-        $vars = SystemUtil::makeEnvVarString($this->getMakeExtraVars());
-        shell()->cd(SOURCE_PATH . '/php-src')
-            ->exec('sed -i "s|//lib|/lib|g" Makefile')
-            ->exec("\$SPC_CMD_PREFIX_PHP_MAKE {$vars} cli");
-
-        if ($this->getOption('with-upx-pack')) {
-            shell()->cd(SOURCE_PATH . '/php-src/sapi/cli')
-                ->exec('strip --strip-all php')
-                ->exec(getenv('UPX_EXEC') . ' --best php');
-        } elseif (!$this->getOption('no-strip', false)) {
-            shell()->cd(SOURCE_PATH . '/php-src/sapi/cli')->exec('strip --strip-all php');
+        if ($this->getExt('readline') && SPCTarget::isStatic()) {
+            SourcePatcher::patchFile('musl_static_readline.patch', SOURCE_PATH . '/php-src');
         }
 
-        $this->deployBinary(BUILD_TARGET_CLI);
+        $vars = SystemUtil::makeEnvVarString($this->getMakeExtraVars());
+        $concurrency = getenv('SPC_CONCURRENCY') ? '-j' . getenv('SPC_CONCURRENCY') : '';
+        shell()->cd(SOURCE_PATH . '/php-src')
+            ->exec('sed -i "s|//lib|/lib|g" Makefile')
+            ->exec("make {$concurrency} {$vars} cli");
+
+        if ($this->getExt('readline') && SPCTarget::isStatic()) {
+            SourcePatcher::patchFile('musl_static_readline.patch', SOURCE_PATH . '/php-src', true);
+        }
+
+        $this->deploySAPIBinary(BUILD_TARGET_CLI);
+    }
+
+    protected function buildCgi(): void
+    {
+        $vars = SystemUtil::makeEnvVarString($this->getMakeExtraVars());
+        $concurrency = getenv('SPC_CONCURRENCY') ? '-j' . getenv('SPC_CONCURRENCY') : '';
+        shell()->cd(SOURCE_PATH . '/php-src')
+            ->exec('sed -i "s|//lib|/lib|g" Makefile')
+            ->exec("make {$concurrency} {$vars} cgi");
+
+        $this->deploySAPIBinary(BUILD_TARGET_CGI);
     }
 
     /**
      * Build phpmicro sapi
-     *
-     * @throws FileSystemException
-     * @throws RuntimeException
-     * @throws WrongUsageException
      */
     protected function buildMicro(): void
     {
         if ($this->getPHPVersionID() < 80000) {
             throw new WrongUsageException('phpmicro only support PHP >= 8.0!');
         }
-        if ($this->getExt('phar')) {
-            $this->phar_patched = true;
-            SourcePatcher::patchMicroPhar($this->getPHPVersionID());
-        }
+        try {
+            if ($this->getExt('phar')) {
+                $this->phar_patched = true;
+                SourcePatcher::patchMicroPhar($this->getPHPVersionID());
+            }
 
-        $enable_fake_cli = $this->getOption('with-micro-fake-cli', false) ? ' -DPHP_MICRO_FAKE_CLI' : '';
-        $vars = $this->getMakeExtraVars();
+            $enable_fake_cli = $this->getOption('with-micro-fake-cli', false) ? ' -DPHP_MICRO_FAKE_CLI' : '';
+            $vars = $this->getMakeExtraVars();
 
-        // patch fake cli for micro
-        $vars['EXTRA_CFLAGS'] .= $enable_fake_cli;
-        $vars = SystemUtil::makeEnvVarString($vars);
+            // patch fake cli for micro
+            $vars['EXTRA_CFLAGS'] .= $enable_fake_cli;
+            $vars = SystemUtil::makeEnvVarString($vars);
+            $concurrency = getenv('SPC_CONCURRENCY') ? '-j' . getenv('SPC_CONCURRENCY') : '';
 
-        shell()->cd(SOURCE_PATH . '/php-src')
-            ->exec('sed -i "s|//lib|/lib|g" Makefile')
-            ->exec("\$SPC_CMD_PREFIX_PHP_MAKE {$vars} micro");
+            shell()->cd(SOURCE_PATH . '/php-src')
+                ->exec('sed -i "s|//lib|/lib|g" Makefile')
+                ->exec("make {$concurrency} {$vars} micro");
 
-        $this->processMicroUPX();
+            // deploy micro.sfx
+            $dst = $this->deploySAPIBinary(BUILD_TARGET_MICRO);
 
-        $this->deployBinary(BUILD_TARGET_MICRO);
-
-        if ($this->phar_patched) {
-            SourcePatcher::unpatchMicroPhar();
+            // patch after UPX-ed micro.sfx
+            $this->processUpxedMicroSfx($dst);
+        } finally {
+            if ($this->phar_patched) {
+                SourcePatcher::unpatchMicroPhar();
+            }
         }
     }
 
     /**
      * Build fpm sapi
-     *
-     * @throws FileSystemException
-     * @throws RuntimeException
      */
     protected function buildFpm(): void
     {
         $vars = SystemUtil::makeEnvVarString($this->getMakeExtraVars());
+        $concurrency = getenv('SPC_CONCURRENCY') ? '-j' . getenv('SPC_CONCURRENCY') : '';
         shell()->cd(SOURCE_PATH . '/php-src')
             ->exec('sed -i "s|//lib|/lib|g" Makefile')
-            ->exec("\$SPC_CMD_PREFIX_PHP_MAKE {$vars} fpm");
+            ->exec("make {$concurrency} {$vars} fpm");
 
-        if ($this->getOption('with-upx-pack')) {
-            shell()->cd(SOURCE_PATH . '/php-src/sapi/fpm')
-                ->exec('strip --strip-all php-fpm')
-                ->exec(getenv('UPX_EXEC') . ' --best php-fpm');
-        } elseif (!$this->getOption('no-strip', false)) {
-            shell()->cd(SOURCE_PATH . '/php-src/sapi/fpm')->exec('strip --strip-all php-fpm');
-        }
-        $this->deployBinary(BUILD_TARGET_FPM);
+        $this->deploySAPIBinary(BUILD_TARGET_FPM);
     }
 
     /**
      * Build embed sapi
-     *
-     * @throws RuntimeException
      */
     protected function buildEmbed(): void
     {
-        $vars = SystemUtil::makeEnvVarString($this->getMakeExtraVars());
+        $sharedExts = array_filter($this->exts, static fn ($ext) => $ext->isBuildShared());
+        $sharedExts = array_filter($sharedExts, static function ($ext) {
+            return Config::getExt($ext->getName(), 'build-with-php') === true;
+        });
+        $install_modules = $sharedExts ? 'install-modules' : '';
 
+        // detect changes in module path
+        $diff = new DirDiff(BUILD_MODULES_PATH, true);
+        $vars = SystemUtil::makeEnvVarString($this->getMakeExtraVars());
+        $concurrency = getenv('SPC_CONCURRENCY') ? '-j' . getenv('SPC_CONCURRENCY') : '';
         shell()->cd(SOURCE_PATH . '/php-src')
             ->exec('sed -i "s|//lib|/lib|g" Makefile')
-            ->exec(getenv('SPC_CMD_PREFIX_PHP_MAKE') . ' INSTALL_ROOT=' . BUILD_ROOT_PATH . " {$vars} install");
+            ->exec('sed -i "s|^EXTENSION_DIR = .*|EXTENSION_DIR = /' . basename(BUILD_MODULES_PATH) . '|" Makefile')
+            ->exec("make {$concurrency} INSTALL_ROOT=" . BUILD_ROOT_PATH . " {$vars} install-sapi {$install_modules} install-build install-headers install-programs");
+
+        // process libphp.so for shared embed
+        $libphpSo = BUILD_LIB_PATH . '/libphp.so';
+        $libphpSoDest = BUILD_LIB_PATH . '/libphp.so';
+        if (file_exists($libphpSo)) {
+            // deploy libphp.so
+            preg_match('/-release\s+(\S*)/', getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS'), $matches);
+            if (!empty($matches[1])) {
+                $libphpSoDest = str_replace('.so', '-' . $matches[1] . '.so', $libphpSo);
+            }
+            $this->deployBinary($libphpSo, $libphpSoDest, false);
+        }
+
+        // process shared extensions build-with-php
+        $increment_files = $diff->getChangedFiles();
+        foreach ($increment_files as $increment_file) {
+            $this->deployBinary($increment_file, $increment_file, false);
+        }
+
+        // process libphp.a for static embed
+        if (getenv('SPC_CMD_VAR_PHP_EMBED_TYPE') === 'static') {
+            $AR = getenv('AR') ?: 'ar';
+            f_passthru("{$AR} -t " . BUILD_LIB_PATH . "/libphp.a | grep '\\.a$' | xargs -n1 {$AR} d " . BUILD_LIB_PATH . '/libphp.a');
+            // export dynamic symbols
+            SystemUtil::exportDynamicSymbols(BUILD_LIB_PATH . '/libphp.a');
+        }
+
+        // patch embed php scripts
         $this->patchPhpScripts();
     }
 
+    /**
+     * Return extra variables for php make command.
+     */
     private function getMakeExtraVars(): array
     {
-        return [
+        $config = (new SPCConfigUtil($this, ['libs_only_deps' => true, 'absolute_libs' => true]))->config($this->ext_list, $this->lib_list, $this->getOption('with-suggested-exts'), $this->getOption('with-suggested-libs'));
+        $static = SPCTarget::isStatic() ? '-all-static' : '';
+        $lib = BUILD_LIB_PATH;
+        return array_filter([
             'EXTRA_CFLAGS' => getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS'),
-            'EXTRA_LIBS' => getenv('SPC_EXTRA_LIBS') . ' ' . getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LIBS'),
-            'EXTRA_LDFLAGS_PROGRAM' => getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_PROGRAM'),
-        ];
+            'EXTRA_LIBS' => $config['libs'],
+            'EXTRA_LDFLAGS' => getenv('SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS'),
+            'EXTRA_LDFLAGS_PROGRAM' => "-L{$lib} {$static} -pie",
+        ]);
     }
 
     /**
-     * Apply option --no-strip and --with-upx-pack for micro sapi (only for phpmicro 0.1.x)
-     *
-     * @throws FileSystemException
+     * Patch micro.sfx after UPX compression.
+     * micro needs special section handling in LinuxBuilder.
+     * The micro.sfx does not support UPX directly, but we can remove UPX
+     * info segment to adapt.
+     * This will also make micro.sfx with upx-packed more like a malware fore antivirus
      */
-    private function processMicroUPXLegacy(): void
+    private function processUpxedMicroSfx(string $dst): void
     {
-        // upx pack and strip for micro
-        // but always restore Makefile.frag.bak first
-        if (file_exists(SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag.bak')) {
-            copy(SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag.bak', SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag');
-        }
-        if ($this->getOption('with-upx-pack', false)) {
-            // judge $(MAKE) micro_2s_objs SFX_FILESIZE=`$(STAT_SIZE) $(SAPI_MICRO_PATH)` count
-            // if 2, replace src/globals/extra/micro-triple-Makefile.frag file content
-            if (substr_count(FileSystem::readFile(SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag'), '$(MAKE) micro_2s_objs SFX_FILESIZE=`$(STAT_SIZE) $(SAPI_MICRO_PATH)`') === 2) {
-                // bak first
-                copy(SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag', SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag.bak');
-                // replace Makefile.frag content
-                FileSystem::writeFile(SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag', FileSystem::readFile(ROOT_DIR . '/src/globals/extra/micro-triple-Makefile.frag'));
+        if ($this->getOption('with-upx-pack') && version_compare($this->getMicroVersion(), '0.2.0') >= 0) {
+            // strip first
+            // cut binary with readelf
+            [$ret, $out] = shell()->execWithResult("readelf -l {$dst} | awk '/LOAD|GNU_STACK/ {getline; print \$1, \$2, \$3, \$4, \$6, \$7}'");
+            $out[1] = explode(' ', $out[1]);
+            $offset = $out[1][0];
+            if ($ret !== 0 || !str_starts_with($offset, '0x')) {
+                throw new PatchException('phpmicro UPX patcher', 'Cannot find offset in readelf output');
             }
-            // with upx pack always need strip
-            FileSystem::replaceFileRegex(
-                SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag',
-                '/POST_MICRO_BUILD_COMMANDS=.*/',
-                'POST_MICRO_BUILD_COMMANDS=\$(STRIP) \$(MICRO_STRIP_FLAGS) \$(SAPI_MICRO_PATH) && ' . getenv('UPX_EXEC') . ' --best \$(SAPI_MICRO_PATH)',
-            );
-        } elseif (!$this->getOption('no-strip', false)) {
-            // not-no-strip means strip (default behavior)
-            FileSystem::replaceFileRegex(
-                SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag',
-                '/POST_MICRO_BUILD_COMMANDS=.*/',
-                'POST_MICRO_BUILD_COMMANDS=\$(STRIP) \$(MICRO_STRIP_FLAGS) \$(SAPI_MICRO_PATH)',
-            );
-        } else {
-            // just no strip
-            FileSystem::replaceFileRegex(
-                SOURCE_PATH . '/php-src/sapi/micro/Makefile.frag',
-                '/POST_MICRO_BUILD_COMMANDS=.*/',
-                'POST_MICRO_BUILD_COMMANDS=true',
-            );
-        }
-    }
-
-    private function processMicroUPX(): void
-    {
-        if (version_compare($this->getMicroVersion(), '0.2.0') >= 0 && !$this->getOption('no-strip', false)) {
-            shell()->exec('strip --strip-all ' . SOURCE_PATH . '/php-src/sapi/micro/micro.sfx');
-
-            if ($this->getOption('with-upx-pack')) {
-                // strip first
-                shell()->exec(getenv('UPX_EXEC') . ' --best ' . SOURCE_PATH . '/php-src/sapi/micro/micro.sfx');
-                // cut binary with readelf
-                [$ret, $out] = shell()->execWithResult('readelf -l ' . SOURCE_PATH . '/php-src/sapi/micro/micro.sfx | awk \'/LOAD|GNU_STACK/ {getline; print $1, $2, $3, $4, $6, $7}\'');
-                $out[1] = explode(' ', $out[1]);
-                $offset = $out[1][0];
-                if ($ret !== 0 || !str_starts_with($offset, '0x')) {
-                    throw new RuntimeException('Cannot find offset in readelf output');
-                }
-                $offset = hexdec($offset);
-                // remove upx extra wastes
-                file_put_contents(SOURCE_PATH . '/php-src/sapi/micro/micro.sfx', substr(file_get_contents(SOURCE_PATH . '/php-src/sapi/micro/micro.sfx'), 0, $offset));
-            }
+            $offset = hexdec($offset);
+            // remove upx extra wastes
+            file_put_contents($dst, substr(file_get_contents($dst), 0, $offset));
         }
     }
 }
